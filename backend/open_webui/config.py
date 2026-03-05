@@ -1587,6 +1587,10 @@ USER_PERMISSIONS_FEATURES_MEMORIES = (
     os.environ.get("USER_PERMISSIONS_FEATURES_MEMORIES", "True").lower() == "true"
 )
 
+USER_PERMISSIONS_FEATURES_QC = (
+    os.environ.get("USER_PERMISSIONS_FEATURES_QC", "True").lower() == "true"
+)
+
 
 USER_PERMISSIONS_SETTINGS_INTERFACE = (
     os.environ.get("USER_PERMISSIONS_SETTINGS_INTERFACE", "True").lower() == "true"
@@ -1658,6 +1662,7 @@ DEFAULT_USER_PERMISSIONS = {
         "image_generation": USER_PERMISSIONS_FEATURES_IMAGE_GENERATION,
         "code_interpreter": USER_PERMISSIONS_FEATURES_CODE_INTERPRETER,
         "memories": USER_PERMISSIONS_FEATURES_MEMORIES,
+        "qc": USER_PERMISSIONS_FEATURES_QC,
     },
     "settings": {
         "interface": USER_PERMISSIONS_SETTINGS_INTERFACE,

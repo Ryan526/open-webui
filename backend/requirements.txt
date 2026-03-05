@@ -142,6 +142,9 @@ ldap3==2.9.1
 ## Firecrawl
 firecrawl-py==4.14.0
 
+## QC Document Processing
+pymupdf
+
 ## Trace
 opentelemetry-api==1.39.1
 opentelemetry-sdk==1.39.1

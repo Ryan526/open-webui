@@ -1,0 +1,118 @@
+<script lang="ts">
+	import { getContext, createEventDispatcher } from 'svelte';
+	import SeverityBadge from '../SeverityBadge.svelte';
+
+	const i18n = getContext('i18n');
+	const dispatch = createEventDispatcher();
+
+	export let finding: any;
+
+	let expanded = false;
+
+	const statusOptions = [
+		{ value: 'open', label: 'Open' },
+		{ value: 'confirmed', label: 'Confirmed' },
+		{ value: 'dismissed', label: 'Dismissed' },
+		{ value: 'resolved', label: 'Resolved' }
+	];
+</script>
+
+<div class="px-3 py-2.5 hover:bg-gray-50 dark:hover:bg-gray-850/50 transition">
+	<!-- Header row -->
+	<div class="flex items-start gap-2">
+		<!-- Finding number badge -->
+		<button
+			class="shrink-0 w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold {finding.severity ===
+			'critical'
+				? 'bg-red-500 text-white'
+				: finding.severity === 'major'
+					? 'bg-orange-500 text-white'
+					: finding.severity === 'minor'
+						? 'bg-yellow-500 text-white'
+						: 'bg-blue-500 text-white'}"
+			on:click={() => dispatch('navigate')}
+			title={$i18n.t('Go to page')}
+		>
+			{finding.finding_number || '?'}
+		</button>
+
+		<div class="flex-1 min-w-0">
+			<div class="flex items-center gap-1.5 flex-wrap">
+				<span class="text-xs font-medium truncate">{finding.title}</span>
+				<SeverityBadge severity={finding.severity} />
+			</div>
+
+			<div class="flex items-center gap-2 mt-0.5 text-xs text-gray-400">
+				{#if finding.page_number}
+					<button
+						class="hover:text-blue-500 transition"
+						on:click={() => dispatch('navigate')}
+					>
+						p.{finding.page_number}
+					</button>
+				{/if}
+				<span class="capitalize">{finding.source}</span>
+			</div>
+		</div>
+
+		<!-- Status dropdown -->
+		<select
+			class="text-xs rounded border border-gray-200 dark:border-gray-700 bg-transparent px-1 py-0.5 outline-none shrink-0 {finding.status ===
+			'resolved'
+				? 'text-green-600'
+				: finding.status === 'dismissed'
+					? 'text-gray-400'
+					: finding.status === 'confirmed'
+						? 'text-orange-600'
+						: ''}"
+			value={finding.status}
+			on:change={(e) => dispatch('statusChange', e.target.value)}
+		>
+			{#each statusOptions as opt}
+				<option value={opt.value}>{opt.label}</option>
+			{/each}
+		</select>
+	</div>
+
+	<!-- Expandable details -->
+	{#if finding.description || finding.ai_response?.reasoning}
+		<button
+			class="text-xs text-gray-400 hover:text-gray-600 mt-1 flex items-center gap-1"
+			on:click={() => (expanded = !expanded)}
+		>
+			<svg
+				xmlns="http://www.w3.org/2000/svg"
+				fill="none"
+				viewBox="0 0 24 24"
+				stroke-width="2"
+				stroke="currentColor"
+				class="size-3 transition-transform {expanded ? 'rotate-90' : ''}"
+			>
+				<path stroke-linecap="round" stroke-linejoin="round" d="m8.25 4.5 7.5 7.5-7.5 7.5" />
+			</svg>
+			{expanded ? $i18n.t('Less') : $i18n.t('More')}
+		</button>
+	{/if}
+
+	{#if expanded}
+		<div class="mt-2 text-xs text-gray-600 dark:text-gray-400 space-y-1.5">
+			{#if finding.description}
+				<p>{finding.description}</p>
+			{/if}
+			{#if finding.ai_response?.reasoning}
+				<div class="p-2 rounded-lg bg-gray-100 dark:bg-gray-800">
+					<span class="font-medium">{$i18n.t('AI Reasoning')}:</span>
+					{finding.ai_response.reasoning}
+				</div>
+			{/if}
+			<div class="flex items-center gap-2 pt-1">
+				<button
+					class="text-red-500 hover:text-red-700 transition text-xs"
+					on:click={() => dispatch('delete')}
+				>
+					{$i18n.t('Delete')}
+				</button>
+			</div>
+		</div>
+	{/if}
+</div>

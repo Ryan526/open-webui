@@ -72,6 +72,9 @@ export const functions = writable(null);
 export const toolServers = writable([]);
 export const terminalServers = writable([]);
 
+export const qcTemplates = writable(null);
+export const qcJobs = writable(null);
+
 export const banners: Writable<Banner[]> = writable([]);
 
 export const settings: Writable<Settings> = writable({});
