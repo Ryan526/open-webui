@@ -9,12 +9,14 @@
 		getQCFindings,
 		runQCJob,
 		addQCJobDocument,
-		exportQCJob
+		exportQCJob,
+		selfImproveQCTemplate
 	} from '$lib/apis/qc';
 
 	import DocumentViewer from './DocumentViewer.svelte';
 	import FindingsPanel from './FindingsPanel.svelte';
 	import JobStatusBadge from '../JobStatusBadge.svelte';
+	import SelfImproveDialog from './SelfImproveDialog.svelte';
 	import Spinner from '$lib/components/common/Spinner.svelte';
 
 	const i18n = getContext('i18n');
@@ -35,11 +37,21 @@
 
 	let pollInterval: number | null = null;
 
+	// Self-improve state
+	let selfImproveLoading = false;
+	let selfImproveSuggestions: any = null;
+	let showSelfImproveDialog = false;
+
 	$: selectedDoc = documents[selectedDocIndex] || null;
 	$: pageFindings = findings.filter(
 		(f) =>
 			f.document_id === selectedDoc?.id && f.page_number === selectedPage
 	);
+
+	$: canSelfImprove =
+		job?.status === 'completed' &&
+		job?.template_id &&
+		findings.some((f) => f.status === 'confirmed' || f.status === 'dismissed');
 
 	const loadJob = async () => {
 		try {
@@ -124,6 +136,18 @@
 		}
 	};
 
+	const handleSelfImprove = async () => {
+		selfImproveLoading = true;
+		try {
+			selfImproveSuggestions = await selfImproveQCTemplate(localStorage.token, jobId);
+			showSelfImproveDialog = true;
+		} catch (e) {
+			toast.error(`${e}`);
+		} finally {
+			selfImproveLoading = false;
+		}
+	};
+
 	const navigateToFinding = (finding: any) => {
 		// Find the document and page for this finding
 		if (finding.document_id) {
@@ -204,6 +228,34 @@
 				</button>
 
 				{#if job.status === 'completed'}
+					{#if canSelfImprove}
+						<button
+							class="px-3 py-1 text-xs rounded-lg border border-purple-300 dark:border-purple-700 text-purple-600 dark:text-purple-400 hover:bg-purple-50 dark:hover:bg-purple-900/20 transition disabled:opacity-50 flex items-center gap-1.5"
+							disabled={selfImproveLoading}
+							on:click={handleSelfImprove}
+						>
+							{#if selfImproveLoading}
+								<Spinner className="size-3" />
+							{:else}
+								<svg
+									xmlns="http://www.w3.org/2000/svg"
+									fill="none"
+									viewBox="0 0 24 24"
+									stroke-width="1.5"
+									stroke="currentColor"
+									class="size-3.5"
+								>
+									<path
+										stroke-linecap="round"
+										stroke-linejoin="round"
+										d="M9.813 15.904 9 18.75l-.813-2.846a4.5 4.5 0 0 0-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 0 0 3.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 0 0 3.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 0 0-3.09 3.09ZM18.259 8.715 18 9.75l-.259-1.035a3.375 3.375 0 0 0-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 0 0 2.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 0 0 2.455 2.456L21.75 6l-1.036.259a3.375 3.375 0 0 0-2.455 2.456ZM16.894 20.567 16.5 21.75l-.394-1.183a2.25 2.25 0 0 0-1.423-1.423L13.5 18.75l1.183-.394a2.25 2.25 0 0 0 1.423-1.423l.394-1.183.394 1.183a2.25 2.25 0 0 0 1.423 1.423l1.183.394-1.183.394a2.25 2.25 0 0 0-1.423 1.423Z"
+									/>
+								</svg>
+							{/if}
+							{selfImproveLoading ? $i18n.t('Analyzing...') : $i18n.t('Improve Template')}
+						</button>
+					{/if}
+
 					<button
 						class="px-3 py-1 text-xs rounded-lg border border-gray-200 dark:border-gray-700 hover:bg-gray-100 dark:hover:bg-gray-800 transition"
 						on:click={() => handleExport('csv')}
@@ -299,3 +351,9 @@
 		</div>
 	{/if}
 {/if}
+
+<!-- Self-Improve Dialog -->
+<SelfImproveDialog
+	suggestions={selfImproveSuggestions}
+	bind:show={showSelfImproveDialog}
+/>

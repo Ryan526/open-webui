@@ -383,6 +383,59 @@ async def run_job(
     return {"status": True, "message": "QC analysis started"}
 
 
+@router.post("/jobs/{job_id}/self-improve")
+async def self_improve_template(
+    job_id: str,
+    request: Request,
+    user=Depends(get_verified_user),
+):
+    """Analyze reviewed findings and suggest improvements to the source template."""
+    _check_qc_access(request, user)
+    job = QCJobs.get_job_by_id(job_id)
+    _check_job_access(job, user)
+
+    if job.status != "completed":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Job must be completed before self-improvement",
+        )
+
+    if not job.template_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Job has no associated template",
+        )
+
+    template = QCTemplates.get_template_by_id(job.template_id)
+    if not template:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Source template no longer exists",
+        )
+
+    _check_template_access(template, user, write=True)
+
+    findings = QCFindings.get_findings_by_job_id(job_id)
+    has_reviewed = any(f.status in ("confirmed", "dismissed") for f in findings)
+    if not has_reviewed:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="At least one finding must be confirmed or dismissed",
+        )
+
+    from open_webui.utils.qc_analysis import generate_self_improve_suggestions
+
+    suggestions = await generate_self_improve_suggestions(
+        request, job, template, findings, user
+    )
+
+    suggestions["template_id"] = template.id
+    suggestions["template_updated_at"] = template.updated_at
+    suggestions["job_created_at"] = job.created_at
+
+    return suggestions
+
+
 @router.get("/jobs/{id}/export")
 async def export_job(
     id: str,

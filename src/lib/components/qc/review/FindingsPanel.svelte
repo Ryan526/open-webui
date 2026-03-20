@@ -31,9 +31,15 @@
 
 	$: sortedFindings = [...filteredFindings].sort((a, b) => a.finding_number - b.finding_number);
 
-	const handleStatusChange = async (findingId: string, newStatus: string) => {
+	const handleStatusChange = async (findingId: string, detail: { status: string; dismissalReason?: string }) => {
 		try {
-			await updateQCFinding(localStorage.token, jobId, findingId, { status: newStatus });
+			const updateData: any = { status: detail.status };
+			if (detail.dismissalReason !== undefined) {
+				// Find the existing finding to preserve its meta
+				const existing = findings.find((f) => f.id === findingId);
+				updateData.meta = { ...(existing?.meta || {}), dismissal_reason: detail.dismissalReason };
+			}
+			await updateQCFinding(localStorage.token, jobId, findingId, updateData);
 			dispatch('refresh');
 		} catch (e) {
 			toast.error(`${e}`);

@@ -209,6 +209,181 @@ def parse_ai_response(content: str) -> dict:
     }
 
 
+SELF_IMPROVE_SYSTEM_PROMPT = """You are a QC template optimization assistant. You analyze feedback from QC reviews to suggest improvements to QC templates.
+
+You will receive:
+1. The current template system prompt
+2. The current checklist criteria
+3. Confirmed findings — real issues the AI correctly identified
+4. Dismissed findings with reasons — false positives that should be avoided
+
+Your task is to suggest changes to the system prompt and checklist that would:
+- Reduce false positives (based on dismissed findings and their reasons)
+- Reinforce patterns that correctly identified real issues
+- Add new checklist items if review feedback suggests gaps
+
+Return your response as a JSON object with this exact structure:
+{
+  "summary": "Brief overall assessment of the review feedback and suggested improvements",
+  "system_prompt_changes": [
+    { "action": "append", "text": "Text to add to the system prompt", "reason": "Why this addition helps" },
+    { "action": "replace", "original": "Exact text to find", "replacement": "New text to use instead", "reason": "Why this replacement helps" },
+    { "action": "remove", "text": "Exact text to remove", "reason": "Why removing this helps" }
+  ],
+  "checklist_changes": [
+    { "action": "add", "item": { "label": "New item label", "description": "What to check", "severity": "critical|major|minor|info" }, "reason": "Why this item should be added" },
+    { "action": "modify", "item_id": "id-of-existing-item", "updates": { "label": "Updated label", "description": "Updated description", "severity": "updated-severity" }, "reason": "Why this modification helps" },
+    { "action": "remove", "item_id": "id-of-item-to-remove", "reason": "Why this item should be removed" }
+  ]
+}
+
+Guidelines:
+- Only suggest changes that are clearly supported by the review feedback
+- Be conservative — prefer fewer, high-confidence suggestions over many speculative ones
+- For system_prompt replacements, use exact text that can be found in the current prompt
+- Include clear reasons for each suggestion
+- If no changes are needed for a category, return an empty array
+- Return ONLY valid JSON, no markdown code blocks or other text"""
+
+
+async def generate_self_improve_suggestions(
+    request: Any,
+    job: Any,
+    template: Any,
+    findings: list,
+    user: Any,
+) -> dict:
+    """
+    Analyze reviewed findings and suggest improvements to the QC template.
+    Returns a dict with summary, system_prompt_changes, and checklist_changes.
+    """
+    from open_webui.utils.chat import generate_chat_completion
+
+    # Build context from findings
+    confirmed = [f for f in findings if f.status == "confirmed"]
+    dismissed = [f for f in findings if f.status == "dismissed"]
+
+    confirmed_text = ""
+    if confirmed:
+        confirmed_text = "\n--- Confirmed Findings (Real Issues) ---\n"
+        for f in confirmed:
+            confirmed_text += f"- [{f.severity.upper()}] {f.title}: {f.description or 'No description'}\n"
+
+    dismissed_text = ""
+    if dismissed:
+        dismissed_text = "\n--- Dismissed Findings (False Positives) ---\n"
+        for f in dismissed:
+            reason = (f.meta or {}).get("dismissal_reason", "No reason given")
+            dismissed_text += f"- [{f.severity.upper()}] {f.title}: {f.description or 'No description'}\n  Dismissal reason: {reason}\n"
+
+    # Build checklist text
+    template_meta = template.meta or {}
+    checklist = template_meta.get("checklist", [])
+    checklist_text = ""
+    if checklist:
+        checklist_text = "\n--- Current Checklist Criteria ---\n"
+        for item in checklist:
+            severity = item.get("severity", "info")
+            label = item.get("label", "")
+            desc = item.get("description", "")
+            item_id = item.get("id", "")
+            checklist_text += f"- [{severity.upper()}] {label} (id: {item_id}): {desc}\n"
+
+    user_message = f"""Please analyze the following QC review feedback and suggest improvements to the template.
+
+--- Current System Prompt ---
+{template.system_prompt or '(No system prompt set)'}
+{checklist_text}
+{confirmed_text}
+{dismissed_text}
+
+Based on this review feedback, suggest changes to improve the template's system prompt and checklist criteria."""
+
+    form_data = {
+        "model": job.model_id,
+        "messages": [
+            {"role": "system", "content": SELF_IMPROVE_SYSTEM_PROMPT},
+            {"role": "user", "content": user_message},
+        ],
+        "stream": False,
+        "metadata": {
+            "task": "qc_self_improve",
+            "task_body": f"QC template self-improvement for job {job.id}",
+        },
+    }
+
+    try:
+        response = await generate_chat_completion(
+            request,
+            form_data,
+            user=user,
+            bypass_filter=True,
+        )
+
+        # Handle response
+        if hasattr(response, "body"):
+            body = b""
+            async for chunk in response.body_iterator:
+                if isinstance(chunk, bytes):
+                    body += chunk
+                else:
+                    body += chunk.encode()
+            response_data = json.loads(body)
+        elif isinstance(response, dict):
+            response_data = response
+        else:
+            response_data = json.loads(response)
+
+        # Extract content
+        content = ""
+        if "choices" in response_data and response_data["choices"]:
+            message = response_data["choices"][0].get("message", {})
+            content = message.get("content", "")
+        elif "message" in response_data:
+            content = response_data["message"].get("content", "")
+
+        return _parse_self_improve_response(content)
+
+    except Exception as e:
+        log.error(f"Error generating self-improve suggestions: {e}")
+        return {
+            "summary": f"Failed to generate suggestions: {str(e)}",
+            "system_prompt_changes": [],
+            "checklist_changes": [],
+            "error": True,
+        }
+
+
+def _parse_self_improve_response(content: str) -> dict:
+    """Parse the self-improve LLM response into structured suggestions."""
+    content = content.strip()
+
+    # Remove markdown code blocks if present
+    if content.startswith("```"):
+        lines = content.split("\n")
+        lines = [l for l in lines if not l.strip().startswith("```")]
+        content = "\n".join(lines)
+
+    try:
+        result = json.loads(content)
+        # Validate expected structure
+        if "summary" not in result:
+            result["summary"] = "Suggestions generated"
+        if "system_prompt_changes" not in result:
+            result["system_prompt_changes"] = []
+        if "checklist_changes" not in result:
+            result["checklist_changes"] = []
+        return result
+    except json.JSONDecodeError:
+        return {
+            "summary": "Could not parse AI response as structured suggestions.",
+            "system_prompt_changes": [],
+            "checklist_changes": [],
+            "raw_response": content[:2000],
+            "error": True,
+        }
+
+
 async def run_qc_job(
     request: Any,
     job_id: str,

@@ -8,6 +8,8 @@
 	export let finding: any;
 
 	let expanded = false;
+	let showDismissalInput = false;
+	let dismissalReason = '';
 
 	const statusOptions = [
 		{ value: 'open', label: 'Open' },
@@ -15,6 +17,21 @@
 		{ value: 'dismissed', label: 'Dismissed' },
 		{ value: 'resolved', label: 'Resolved' }
 	];
+
+	const handleStatusChange = (newStatus: string) => {
+		if (newStatus === 'dismissed') {
+			showDismissalInput = true;
+			dismissalReason = finding.meta?.dismissal_reason || '';
+		} else {
+			showDismissalInput = false;
+			dispatch('statusChange', { status: newStatus });
+		}
+	};
+
+	const saveDismissal = () => {
+		dispatch('statusChange', { status: 'dismissed', dismissalReason: dismissalReason.trim() });
+		showDismissalInput = false;
+	};
 </script>
 
 <div class="px-3 py-2.5 hover:bg-gray-50 dark:hover:bg-gray-850/50 transition">
@@ -66,13 +83,36 @@
 						? 'text-orange-600'
 						: ''}"
 			value={finding.status}
-			on:change={(e) => dispatch('statusChange', e.target.value)}
+			on:change={(e) => handleStatusChange(e.target.value)}
 		>
 			{#each statusOptions as opt}
 				<option value={opt.value}>{opt.label}</option>
 			{/each}
 		</select>
 	</div>
+
+	<!-- Dismissal reason input -->
+	{#if showDismissalInput}
+		<div class="mt-1.5 flex items-center gap-1.5">
+			<input
+				type="text"
+				bind:value={dismissalReason}
+				placeholder={$i18n.t('Why is this a false positive?')}
+				class="flex-1 text-xs rounded border border-gray-200 dark:border-gray-700 bg-transparent px-2 py-1 outline-none"
+				on:keydown={(e) => e.key === 'Enter' && saveDismissal()}
+			/>
+			<button
+				class="px-2 py-1 text-xs bg-black text-white dark:bg-white dark:text-black rounded hover:opacity-90 transition shrink-0"
+				on:click={saveDismissal}
+			>
+				{$i18n.t('Save')}
+			</button>
+		</div>
+	{:else if finding.status === 'dismissed' && finding.meta?.dismissal_reason}
+		<div class="mt-1 text-xs text-gray-400 italic truncate" title={finding.meta.dismissal_reason}>
+			{$i18n.t('Reason')}: {finding.meta.dismissal_reason}
+		</div>
+	{/if}
 
 	<!-- Expandable details -->
 	{#if finding.description || finding.ai_response?.reasoning}
