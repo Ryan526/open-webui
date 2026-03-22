@@ -235,7 +235,7 @@ class QCFindingModel(BaseModel):
     title: str
     description: Optional[str] = None
 
-    location: Optional[dict] = None
+    location: Optional[dict | list] = None
     ai_response: Optional[dict] = None
 
     meta: Optional[dict] = None
@@ -261,7 +261,7 @@ class QCFindingUpdateForm(BaseModel):
     status: Optional[str] = None
     title: Optional[str] = None
     description: Optional[str] = None
-    location: Optional[dict] = None
+    location: Optional[dict | list] = None
     meta: Optional[dict] = None
 
 
@@ -717,6 +717,15 @@ class QCFindingsTable:
             db.query(QCFinding).filter_by(id=id).delete()
             db.commit()
             return True
+
+    def delete_findings_by_job_id(
+        self, job_id: str, db: Optional[Session] = None
+    ) -> int:
+        """Delete all findings for a job. Returns count of deleted rows."""
+        with get_db_context(db) as db:
+            count = db.query(QCFinding).filter_by(job_id=job_id).delete()
+            db.commit()
+            return count
 
     def get_next_finding_number(
         self, job_id: str, db: Optional[Session] = None

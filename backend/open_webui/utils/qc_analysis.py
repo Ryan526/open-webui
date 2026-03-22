@@ -413,6 +413,11 @@ async def run_qc_job(
     # Update status to running
     QCJobs.update_job_status(job_id, "running")
 
+    # Clear previous findings from any prior run
+    deleted = QCFindings.delete_findings_by_job_id(job_id)
+    if deleted:
+        log.info(f"Cleared {deleted} existing findings for job {job_id}")
+
     model_id = job.model_id
     system_prompt = job.system_prompt or QC_SYSTEM_PROMPT
 
