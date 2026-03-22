@@ -75,6 +75,9 @@ export const terminalServers = writable([]);
 export const qcTemplates = writable(null);
 export const qcJobs = writable(null);
 
+// Persistent Pyodide worker for code interpreter FS
+export const pyodideWorker: Writable<Worker | null> = writable(null);
+
 export const banners: Writable<Banner[]> = writable([]);
 
 export const settings: Writable<Settings> = writable({});
