@@ -276,6 +276,10 @@ async def create_job(
             job_meta["checklist_snapshot"] = template_meta.get("checklist", [])
             knowledge_base_ids = template_meta.get("knowledge_base_ids", [])
             job_meta["knowledge_base_ids"] = knowledge_base_ids
+            # Snapshot cross-reference analysis config
+            xref_config = template_meta.get("cross_reference_analysis")
+            if xref_config:
+                job_meta["cross_reference_analysis"] = xref_config
 
             # Fetch KB content for AI context
             if knowledge_base_ids:

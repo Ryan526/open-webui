@@ -16,6 +16,7 @@
 
 	let severityFilter = '';
 	let statusFilter = '';
+	let sourceFilter = '';
 	let showAddFinding = false;
 
 	// New finding form
@@ -23,9 +24,15 @@
 	let newDescription = '';
 	let newSeverity = 'minor';
 
+	$: hasCrossRefFindings = findings.some((f) => f.source === 'cross_reference');
+
 	$: filteredFindings = findings.filter((f) => {
 		if (severityFilter && f.severity !== severityFilter) return false;
 		if (statusFilter && f.status !== statusFilter) return false;
+		if (sourceFilter) {
+			if (sourceFilter === 'cross_reference' && f.source !== 'cross_reference') return false;
+			if (sourceFilter === 'per_page' && f.source === 'cross_reference') return false;
+		}
 		return true;
 	});
 
@@ -121,6 +128,16 @@
 				<option value="dismissed">{$i18n.t('Dismissed')}</option>
 				<option value="resolved">{$i18n.t('Resolved')}</option>
 			</select>
+			{#if hasCrossRefFindings}
+				<select
+					bind:value={sourceFilter}
+					class="flex-1 text-xs rounded-lg border border-gray-200 dark:border-gray-800 bg-transparent px-2 py-1 outline-none"
+				>
+					<option value="">{$i18n.t('All Sources')}</option>
+					<option value="per_page">{$i18n.t('Per-Page')}</option>
+					<option value="cross_reference">{$i18n.t('Cross-Ref')}</option>
+				</select>
+			{/if}
 		</div>
 	</div>
 
@@ -173,6 +190,7 @@
 					<FindingCard
 						{finding}
 						on:navigate={() => dispatch('navigate', finding)}
+						on:navigateRef={(e) => dispatch('navigateRef', e.detail)}
 						on:statusChange={(e) => handleStatusChange(finding.id, e.detail)}
 						on:delete={() => handleDelete(finding.id)}
 					/>

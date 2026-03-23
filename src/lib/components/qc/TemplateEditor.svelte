@@ -26,7 +26,11 @@
 		knowledge_base_ids: [],
 		checklist: [],
 		vision_settings: { dpi: 300 },
-		supported_file_types: ['pdf', 'png', 'jpg']
+		supported_file_types: ['pdf', 'png', 'jpg'],
+		cross_reference_analysis: {
+			enabled: false,
+			categories: ['equipment_tags', 'wire_sizes', 'cross_sheet_refs', 'load_calcs']
+		}
 	};
 
 	// Knowledge bases
@@ -132,6 +136,10 @@
 						checklist: [],
 						vision_settings: { dpi: 300 },
 						supported_file_types: ['pdf', 'png', 'jpg'],
+						cross_reference_analysis: {
+							enabled: false,
+							categories: ['equipment_tags', 'wire_sizes', 'cross_sheet_refs', 'load_calcs']
+						},
 						...(template.meta || {})
 					};
 					if (meta.knowledge_base_ids.length > 0) {
@@ -417,6 +425,117 @@
 						{$i18n.t('Add')}
 					</button>
 				</div>
+			</div>
+
+			<!-- Cross-Reference Analysis -->
+			<div>
+				<div class="flex items-center justify-between mb-2">
+					<div>
+						<label class="block text-sm font-medium">{$i18n.t('Cross-Reference Analysis')}</label>
+						<p class="text-xs text-gray-500 mt-0.5">
+							{$i18n.t('Checks consistency across all pages after per-page analysis completes.')}
+						</p>
+					</div>
+					<button
+						type="button"
+						class="relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out {meta.cross_reference_analysis.enabled ? 'bg-black dark:bg-white' : 'bg-gray-200 dark:bg-gray-700'}"
+						role="switch"
+						aria-checked={meta.cross_reference_analysis.enabled}
+						on:click={() => { meta.cross_reference_analysis.enabled = !meta.cross_reference_analysis.enabled; meta = meta; }}
+					>
+						<span
+							class="pointer-events-none inline-block h-5 w-5 transform rounded-full shadow ring-0 transition duration-200 ease-in-out {meta.cross_reference_analysis.enabled ? 'translate-x-5 bg-white dark:bg-black' : 'translate-x-0 bg-white dark:bg-gray-400'}"
+						/>
+					</button>
+				</div>
+
+				{#if meta.cross_reference_analysis.enabled}
+					<div class="mt-3 p-3 rounded-xl border border-gray-200 dark:border-gray-800 space-y-2">
+						<p class="text-xs font-medium text-gray-600 dark:text-gray-400 mb-2">
+							{$i18n.t('Analysis categories:')}
+						</p>
+
+						<label class="flex items-center gap-2 text-sm cursor-pointer">
+							<input
+								type="checkbox"
+								checked={meta.cross_reference_analysis.categories.includes('equipment_tags')}
+								on:change={() => {
+									const cats = meta.cross_reference_analysis.categories;
+									if (cats.includes('equipment_tags')) {
+										meta.cross_reference_analysis.categories = cats.filter((c) => c !== 'equipment_tags');
+									} else {
+										meta.cross_reference_analysis.categories = [...cats, 'equipment_tags'];
+									}
+									meta = meta;
+								}}
+								class="rounded"
+							/>
+							<span>{$i18n.t('Equipment tag consistency')}</span>
+							<span class="text-xs text-gray-400">{$i18n.t('Same tag, same ratings everywhere')}</span>
+						</label>
+
+						<label class="flex items-center gap-2 text-sm cursor-pointer">
+							<input
+								type="checkbox"
+								checked={meta.cross_reference_analysis.categories.includes('wire_sizes')}
+								on:change={() => {
+									const cats = meta.cross_reference_analysis.categories;
+									if (cats.includes('wire_sizes')) {
+										meta.cross_reference_analysis.categories = cats.filter((c) => c !== 'wire_sizes');
+									} else {
+										meta.cross_reference_analysis.categories = [...cats, 'wire_sizes'];
+									}
+									meta = meta;
+								}}
+								class="rounded"
+							/>
+							<span>{$i18n.t('Wire/cable sizing verification')}</span>
+							<span class="text-xs text-gray-400">{$i18n.t('Schedule vs. plan wire sizes match')}</span>
+						</label>
+
+						<label class="flex items-center gap-2 text-sm cursor-pointer">
+							<input
+								type="checkbox"
+								checked={meta.cross_reference_analysis.categories.includes('cross_sheet_refs')}
+								on:change={() => {
+									const cats = meta.cross_reference_analysis.categories;
+									if (cats.includes('cross_sheet_refs')) {
+										meta.cross_reference_analysis.categories = cats.filter((c) => c !== 'cross_sheet_refs');
+									} else {
+										meta.cross_reference_analysis.categories = [...cats, 'cross_sheet_refs'];
+									}
+									meta = meta;
+								}}
+								class="rounded"
+							/>
+							<span>{$i18n.t('Cross-sheet reference validation')}</span>
+							<span class="text-xs text-gray-400">{$i18n.t('"See Detail A on E-501" resolves')}</span>
+						</label>
+
+						<label class="flex items-center gap-2 text-sm cursor-pointer">
+							<input
+								type="checkbox"
+								checked={meta.cross_reference_analysis.categories.includes('load_calcs')}
+								on:change={() => {
+									const cats = meta.cross_reference_analysis.categories;
+									if (cats.includes('load_calcs')) {
+										meta.cross_reference_analysis.categories = cats.filter((c) => c !== 'load_calcs');
+									} else {
+										meta.cross_reference_analysis.categories = [...cats, 'load_calcs'];
+									}
+									meta = meta;
+								}}
+								class="rounded"
+							/>
+							<span>{$i18n.t('Load calculation consistency')}</span>
+							<span class="text-xs text-gray-400">{$i18n.t('Ratings, loads, and feeder sizing')}</span>
+						</label>
+
+						<p class="text-xs text-gray-400 mt-2 pt-2 border-t border-gray-200 dark:border-gray-800">
+							{$i18n.t('Adds ~40-60% more analysis time. Uses text extraction + AI correlation across all pages.')}
+						</p>
+					</div>
+				{/if}
 			</div>
 		</div>
 	</div>

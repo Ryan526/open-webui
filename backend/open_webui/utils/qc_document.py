@@ -79,6 +79,84 @@ def find_text_on_page(
         return []
 
 
+def extract_page_text(pdf_path: str, page_number: int) -> dict:
+    """
+    Extract text content and structure from a single PDF page using PyMuPDF.
+
+    Args:
+        pdf_path: Path to the PDF file.
+        page_number: 1-based page number.
+
+    Returns:
+        Dict with:
+          - raw_text: Full extracted text as a string.
+          - blocks: List of text blocks with position info
+            [{text, x0, y0, x1, y1}] normalized to 0-1.
+          - tables: List of tables found on the page, each as a list of rows.
+    """
+    try:
+        import fitz  # PyMuPDF
+    except ImportError:
+        log.error("PyMuPDF (fitz) is not installed")
+        return {"raw_text": "", "blocks": [], "tables": []}
+
+    try:
+        doc = fitz.open(pdf_path)
+        if page_number < 1 or page_number > len(doc):
+            doc.close()
+            return {"raw_text": "", "blocks": [], "tables": []}
+
+        page = doc.load_page(page_number - 1)
+        page_rect = page.rect
+        pw = page_rect.width
+        ph = page_rect.height
+
+        # Extract raw text
+        raw_text = page.get_text("text") or ""
+
+        # Extract positioned text blocks
+        blocks = []
+        if pw > 0 and ph > 0:
+            text_dict = page.get_text("dict", flags=fitz.TEXT_PRESERVE_WHITESPACE)
+            for block in text_dict.get("blocks", []):
+                if block.get("type") != 0:  # 0 = text block
+                    continue
+                block_text = ""
+                for line in block.get("lines", []):
+                    for span in line.get("spans", []):
+                        block_text += span.get("text", "")
+                    block_text += "\n"
+                block_text = block_text.strip()
+                if not block_text:
+                    continue
+                bbox = block.get("bbox", (0, 0, 0, 0))
+                blocks.append({
+                    "text": block_text,
+                    "x0": bbox[0] / pw,
+                    "y0": bbox[1] / ph,
+                    "x1": bbox[2] / pw,
+                    "y1": bbox[3] / ph,
+                })
+
+        # Extract tables
+        tables = []
+        try:
+            page_tables = page.find_tables()
+            for table in page_tables:
+                rows = table.extract()
+                if rows:
+                    tables.append(rows)
+        except Exception as e:
+            log.debug(f"Table extraction failed on page {page_number}: {e}")
+
+        doc.close()
+        return {"raw_text": raw_text, "blocks": blocks, "tables": tables}
+
+    except Exception as e:
+        log.warning(f"Error extracting text from page {page_number}: {e}")
+        return {"raw_text": "", "blocks": [], "tables": []}
+
+
 def convert_pdf_to_pages(file_path: str, dpi: int = 300) -> list[bytes]:
     """Convert each page of a PDF to PNG bytes using PyMuPDF."""
     try:

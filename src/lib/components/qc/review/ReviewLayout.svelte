@@ -159,6 +159,17 @@
 		}
 	};
 
+	const navigateToRef = (ref: any) => {
+		// Navigate to a specific cross-reference page
+		if (ref.document_id) {
+			const docIdx = documents.findIndex((d) => d.id === ref.document_id);
+			if (docIdx !== -1) selectedDocIndex = docIdx;
+		}
+		if (ref.page_number) {
+			selectedPage = ref.page_number;
+		}
+	};
+
 	onMount(async () => {
 		await loadJob();
 		loading = false;
@@ -209,7 +220,13 @@
 			{#if job.status === 'running'}
 				<div class="flex items-center gap-2 text-sm text-blue-600">
 					<Spinner className="size-4" />
-					{$i18n.t('Analyzing...')}
+					{#if job.meta?.progress?.phase === 'cross_reference_extraction'}
+						{$i18n.t('Extracting page data...')}
+					{:else if job.meta?.progress?.phase === 'cross_reference_correlation'}
+						{$i18n.t('Cross-referencing pages...')}
+					{:else}
+						{$i18n.t('Analyzing...')}
+					{/if}
 				</div>
 			{:else}
 				<button
@@ -324,6 +341,7 @@
 					{selectedDoc}
 					{selectedPage}
 					on:navigate={(e) => navigateToFinding(e.detail)}
+					on:navigateRef={(e) => navigateToRef(e.detail)}
 					on:refresh={loadJob}
 				/>
 			</div>
@@ -347,6 +365,9 @@
 			{/if}
 			{#if job.meta.statistics.info_count > 0}
 				<span class="text-blue-600">{job.meta.statistics.info_count} info</span>
+			{/if}
+			{#if job.meta.statistics.cross_ref_findings_count > 0}
+				<span class="text-purple-600">{job.meta.statistics.cross_ref_findings_count} cross-ref</span>
 			{/if}
 		</div>
 	{/if}

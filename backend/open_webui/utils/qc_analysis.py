@@ -9,6 +9,7 @@ from open_webui.utils.qc_document import (
     render_annotated_page,
     image_to_base64,
     find_text_on_page,
+    extract_page_text,
 )
 
 log = logging.getLogger(__name__)
@@ -207,6 +208,580 @@ def parse_ai_response(content: str) -> dict:
         "page_summary": content[:500],
         "page_result": "flagged",
     }
+
+
+####################
+# Cross-Reference Analysis
+####################
+
+EXTRACTION_SYSTEM_PROMPT = """You are a data extraction assistant for electrical design documents. Extract structured information from the provided document page.
+
+Return your response as a JSON object with this exact structure:
+{
+  "page_type": "panel_schedule|one_line|three_line|plan|detail|schedule|elevation|notes|cover|title_block|other",
+  "sheet_id": "E-401 or null if not identifiable",
+  "equipment_tags": [
+    {"tag": "LP-2A", "type": "panel|transformer|disconnect|mcc|switchboard|motor|vfd|other", "attributes": {"bus": "225A", "main": "200A", "voltage": "480/277V"}}
+  ],
+  "circuit_references": [
+    {"circuit": "20A/1P", "panel": "LP-2A", "description": "Lighting Circuit 2", "wire_size": "#12 AWG", "conduit": "3/4\\" EMT"}
+  ],
+  "wire_sizes": [
+    {"size": "#12 AWG", "circuit_or_feeder": "LP-2A-2", "context": "branch circuit to lighting"}
+  ],
+  "cross_references": [
+    {"text": "SEE DETAIL A ON E-501", "target_sheet": "E-501", "detail_or_note": "A"}
+  ],
+  "equipment_ratings": [
+    {"tag": "TX-1", "rating": "75 kVA", "voltage_primary": "480V", "voltage_secondary": "208/120V", "impedance": "5.75%"}
+  ],
+  "conduit_schedule": [
+    {"conduit_id": "C-1", "size": "3/4\\" EMT", "from": "Panel LP-2A", "to": "Junction Box JB-1"}
+  ],
+  "notes": ["Note 1: All conductors to be copper.", "Note 2: ..."]
+}
+
+Rules:
+- Extract ALL equipment tags, circuit references, wire sizes, and cross-references visible on the page.
+- Copy text labels EXACTLY as they appear (case-sensitive, include hyphens/spaces).
+- For attributes, extract whatever is shown (ratings, sizes, voltages, etc.). Use null for unknown values.
+- If a field has no data on this page, return an empty array.
+- Return ONLY valid JSON, no markdown code blocks or other text."""
+
+
+async def extract_page_structured_data(
+    request: Any,
+    model_id: str,
+    pdf_path: Optional[str],
+    page_number: int,
+    page_image_b64: Optional[str],
+    user: Any,
+) -> dict:
+    """
+    Extract structured data from a single page.
+
+    Uses PyMuPDF text extraction first. If substantial text is found (>200 chars),
+    uses a text-only LLM call. Otherwise sends the page image for vision extraction.
+    """
+    from open_webui.utils.chat import generate_chat_completion
+
+    # Try PyMuPDF text extraction first
+    pymupdf_text = ""
+    pymupdf_tables = []
+    if pdf_path:
+        page_data = extract_page_text(pdf_path, page_number)
+        pymupdf_text = page_data.get("raw_text", "")
+        pymupdf_tables = page_data.get("tables", [])
+
+    # Build the user message content based on available data
+    has_substantial_text = len(pymupdf_text.strip()) > 200
+
+    if has_substantial_text:
+        # Text-only extraction (cheaper — no image needed)
+        table_text = ""
+        if pymupdf_tables:
+            table_text = "\n\n--- Tables Found on Page ---\n"
+            for i, table in enumerate(pymupdf_tables, 1):
+                table_text += f"\nTable {i}:\n"
+                for row in table:
+                    table_text += "  | " + " | ".join(
+                        str(cell) if cell else "" for cell in row
+                    ) + " |\n"
+
+        user_content = (
+            f"Extract structured data from page {page_number} of this electrical document.\n\n"
+            f"--- Page Text ---\n{pymupdf_text}{table_text}"
+        )
+        messages = [
+            {"role": "system", "content": EXTRACTION_SYSTEM_PROMPT},
+            {"role": "user", "content": user_content},
+        ]
+    elif page_image_b64:
+        # Vision extraction (needed for graphical pages)
+        context_hint = ""
+        if pymupdf_text.strip():
+            context_hint = f"\n\nText extracted from this page (may be partial):\n{pymupdf_text}"
+
+        messages = [
+            {"role": "system", "content": EXTRACTION_SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": page_image_b64}},
+                    {
+                        "type": "text",
+                        "text": f"Extract structured data from page {page_number} of this electrical document.{context_hint}",
+                    },
+                ],
+            },
+        ]
+    else:
+        log.warning(f"No text or image available for page {page_number} extraction")
+        return _empty_extraction()
+
+    form_data = {
+        "model": model_id,
+        "messages": messages,
+        "stream": False,
+        "metadata": {
+            "task": "qc_extraction",
+            "task_body": f"Data extraction for page {page_number}",
+        },
+    }
+
+    try:
+        response = await generate_chat_completion(
+            request, form_data, user=user, bypass_filter=True
+        )
+
+        if hasattr(response, "body"):
+            body = b""
+            async for chunk in response.body_iterator:
+                if isinstance(chunk, bytes):
+                    body += chunk
+                else:
+                    body += chunk.encode()
+            response_data = json.loads(body)
+        elif isinstance(response, dict):
+            response_data = response
+        else:
+            response_data = json.loads(response)
+
+        content = ""
+        if "choices" in response_data and response_data["choices"]:
+            message = response_data["choices"][0].get("message", {})
+            content = message.get("content", "")
+        elif "message" in response_data:
+            content = response_data["message"].get("content", "")
+
+        return _parse_extraction_response(content)
+
+    except Exception as e:
+        log.error(f"Error extracting data from page {page_number}: {e}")
+        return _empty_extraction()
+
+
+def _empty_extraction() -> dict:
+    """Return an empty extraction result."""
+    return {
+        "page_type": "other",
+        "sheet_id": None,
+        "equipment_tags": [],
+        "circuit_references": [],
+        "wire_sizes": [],
+        "cross_references": [],
+        "equipment_ratings": [],
+        "conduit_schedule": [],
+        "notes": [],
+    }
+
+
+def _parse_extraction_response(content: str) -> dict:
+    """Parse the extraction LLM response into structured data."""
+    content = content.strip()
+    if content.startswith("```"):
+        lines = content.split("\n")
+        lines = [l for l in lines if not l.strip().startswith("```")]
+        content = "\n".join(lines)
+
+    try:
+        result = json.loads(content)
+        # Ensure all expected keys exist
+        defaults = _empty_extraction()
+        for key, default in defaults.items():
+            if key not in result:
+                result[key] = default
+        return result
+    except json.JSONDecodeError:
+        log.warning("Failed to parse extraction response as JSON")
+        return _empty_extraction()
+
+
+def build_cross_reference_index(
+    documents_data: list[dict],
+) -> dict:
+    """
+    Aggregate extracted page data from all documents into a unified cross-reference index.
+
+    Args:
+        documents_data: List of dicts, each with:
+          - document_id: str
+          - document_name: str
+          - pages: dict mapping page_number (int) -> extraction result dict
+
+    Returns:
+        Dict with aggregated data grouped by category for correlation analysis.
+    """
+    equipment_index = {}  # tag -> list of appearances
+    circuit_index = {}    # circuit_key -> list of appearances
+    wire_index = {}       # circuit/feeder -> list of wire size mentions
+    xref_index = []       # all cross-sheet references
+    rating_index = {}     # tag -> list of rating mentions
+    sheet_ids = {}        # sheet_id -> {document_id, page_number}
+
+    for doc in documents_data:
+        doc_id = doc["document_id"]
+        doc_name = doc.get("document_name", "Unknown")
+        for page_num, page_data in doc["pages"].items():
+            page_num = int(page_num)
+            sheet_id = page_data.get("sheet_id")
+            page_type = page_data.get("page_type", "other")
+
+            if sheet_id:
+                sheet_ids[sheet_id] = {
+                    "document_id": doc_id,
+                    "page_number": page_num,
+                    "document_name": doc_name,
+                }
+
+            # Index equipment tags
+            for equip in page_data.get("equipment_tags", []):
+                tag = equip.get("tag", "").strip().upper()
+                if not tag:
+                    continue
+                if tag not in equipment_index:
+                    equipment_index[tag] = []
+                equipment_index[tag].append({
+                    "document_id": doc_id,
+                    "document_name": doc_name,
+                    "page_number": page_num,
+                    "sheet_id": sheet_id,
+                    "page_type": page_type,
+                    "type": equip.get("type"),
+                    "attributes": equip.get("attributes", {}),
+                })
+
+            # Index circuit references
+            for circ in page_data.get("circuit_references", []):
+                panel = (circ.get("panel") or "").strip().upper()
+                circuit = (circ.get("circuit") or "").strip()
+                key = f"{panel}:{circuit}" if panel else circuit
+                if not key:
+                    continue
+                if key not in circuit_index:
+                    circuit_index[key] = []
+                circuit_index[key].append({
+                    "document_id": doc_id,
+                    "document_name": doc_name,
+                    "page_number": page_num,
+                    "sheet_id": sheet_id,
+                    "page_type": page_type,
+                    "description": circ.get("description"),
+                    "wire_size": circ.get("wire_size"),
+                    "conduit": circ.get("conduit"),
+                })
+
+            # Index wire sizes
+            for wire in page_data.get("wire_sizes", []):
+                feeder = (wire.get("circuit_or_feeder") or "").strip().upper()
+                if not feeder:
+                    continue
+                if feeder not in wire_index:
+                    wire_index[feeder] = []
+                wire_index[feeder].append({
+                    "document_id": doc_id,
+                    "document_name": doc_name,
+                    "page_number": page_num,
+                    "sheet_id": sheet_id,
+                    "page_type": page_type,
+                    "size": wire.get("size"),
+                    "context": wire.get("context"),
+                })
+
+            # Index cross-sheet references
+            for xref in page_data.get("cross_references", []):
+                target = xref.get("target_sheet")
+                if target:
+                    xref_index.append({
+                        "source_document_id": doc_id,
+                        "source_document_name": doc_name,
+                        "source_page": page_num,
+                        "source_sheet_id": sheet_id,
+                        "text": xref.get("text", ""),
+                        "target_sheet": target.strip().upper(),
+                        "detail_or_note": xref.get("detail_or_note"),
+                    })
+
+            # Index equipment ratings
+            for rating in page_data.get("equipment_ratings", []):
+                tag = (rating.get("tag") or "").strip().upper()
+                if not tag:
+                    continue
+                if tag not in rating_index:
+                    rating_index[tag] = []
+                rating_data = {k: v for k, v in rating.items() if k != "tag"}
+                rating_data.update({
+                    "document_id": doc_id,
+                    "document_name": doc_name,
+                    "page_number": page_num,
+                    "sheet_id": sheet_id,
+                    "page_type": page_type,
+                })
+                rating_index[tag].append(rating_data)
+
+    return {
+        "equipment": equipment_index,
+        "circuits": circuit_index,
+        "wires": wire_index,
+        "cross_references": xref_index,
+        "ratings": rating_index,
+        "sheets": sheet_ids,
+    }
+
+
+CROSS_REFERENCE_SYSTEM_PROMPT = """You are an electrical design QC cross-reference analyst. You check consistency across all pages/sheets of an electrical drawing set.
+
+You will receive structured data extracted from every page. Your job is to find INCONSISTENCIES and ERRORS across pages — things that don't match between sheets.
+
+Check for these categories of issues:
+
+1. **Equipment Tag Consistency**: Same equipment tag appears on multiple pages with different ratings, types, or attributes. (e.g., panel LP-2A shows 225A bus on the schedule but 200A bus on the one-line)
+
+2. **Wire/Cable Size Mismatches**: Same circuit or feeder shows different wire sizes on different pages. (e.g., circuit LP-2A-4 shows #12 AWG on the panel schedule but #10 AWG on the plan)
+
+3. **Cross-Sheet Reference Validity**: References like "See Detail A on E-501" — does sheet E-501 exist? (Check against the sheets index provided)
+
+4. **Equipment Rating Consistency**: Same equipment tag shows different electrical ratings on different pages. (e.g., transformer TX-1 rated 75 kVA on the one-line but 50 kVA on the schedule)
+
+5. **Circuit Completeness**: Circuits shown in a panel schedule should appear on plan pages. Flag circuits that only appear on one type of sheet.
+
+Return your response as a JSON object:
+{
+  "cross_reference_findings": [
+    {
+      "title": "Brief description of the inconsistency",
+      "description": "Detailed explanation of what doesn't match and where",
+      "severity": "critical|major|minor|info",
+      "cross_ref_type": "equipment_tag|wire_size|sheet_reference|equipment_rating|circuit_completeness",
+      "references": [
+        {"document_id": "...", "page_number": 3, "reference_text": "LP-2A", "context": "Panel schedule shows 225A bus"},
+        {"document_id": "...", "page_number": 7, "reference_text": "LP-2A", "context": "One-line shows 200A bus"}
+      ],
+      "reasoning": "Why this inconsistency matters and potential impact"
+    }
+  ]
+}
+
+Guidelines:
+- Only report REAL inconsistencies with specific evidence from the data.
+- Do NOT flag items that appear on only one page unless they are broken cross-sheet references.
+- Severity guide: critical = safety/code issue (wrong breaker/wire size), major = significant mismatch, minor = minor discrepancy, info = potential issue worth noting.
+- Include the exact document_id and page_number from the source data in references.
+- If no cross-reference issues are found, return an empty findings array.
+- Return ONLY valid JSON, no markdown code blocks or other text."""
+
+
+def _build_correlation_chunks(index: dict, max_chars: int = 80000) -> list[dict]:
+    """
+    Split cross-reference index into themed chunks if the total data
+    exceeds max_chars. Each chunk focuses on specific categories.
+
+    Returns list of dicts with 'categories' (list of str) and 'text' (str).
+    """
+    sections = {}
+
+    # Equipment tags section
+    if index["equipment"]:
+        lines = ["=== EQUIPMENT TAGS (appearances across all pages) ===\n"]
+        for tag, appearances in sorted(index["equipment"].items()):
+            if len(appearances) < 2:
+                continue  # Only interesting if appears on multiple pages
+            lines.append(f"\n{tag}:")
+            for app in appearances:
+                attrs = app.get("attributes", {})
+                attr_str = ", ".join(f"{k}={v}" for k, v in attrs.items() if v) if attrs else "no attributes"
+                lines.append(
+                    f"  Page {app['page_number']} ({app.get('sheet_id', '?')}, {app['page_type']}): "
+                    f"type={app.get('type', '?')}, {attr_str} [doc:{app['document_id'][:8]}]"
+                )
+        sections["equipment_tags"] = "\n".join(lines)
+
+    # Equipment ratings section
+    if index["ratings"]:
+        lines = ["=== EQUIPMENT RATINGS (across all pages) ===\n"]
+        for tag, ratings in sorted(index["ratings"].items()):
+            if len(ratings) < 2:
+                continue
+            lines.append(f"\n{tag}:")
+            for r in ratings:
+                rating_str = ", ".join(
+                    f"{k}={v}" for k, v in r.items()
+                    if k not in ("document_id", "document_name", "page_number", "sheet_id", "page_type") and v
+                )
+                lines.append(
+                    f"  Page {r['page_number']} ({r.get('sheet_id', '?')}, {r['page_type']}): "
+                    f"{rating_str} [doc:{r['document_id'][:8]}]"
+                )
+        sections["equipment_ratings"] = "\n".join(lines)
+
+    # Wire sizes section
+    if index["wires"]:
+        lines = ["=== WIRE SIZES (by circuit/feeder across all pages) ===\n"]
+        for feeder, wires in sorted(index["wires"].items()):
+            if len(wires) < 2:
+                continue
+            lines.append(f"\n{feeder}:")
+            for w in wires:
+                lines.append(
+                    f"  Page {w['page_number']} ({w.get('sheet_id', '?')}, {w['page_type']}): "
+                    f"size={w.get('size', '?')}, context={w.get('context', '?')} [doc:{w['document_id'][:8]}]"
+                )
+        sections["wire_sizes"] = "\n".join(lines)
+
+    # Cross-sheet references section
+    if index["cross_references"]:
+        lines = ["=== CROSS-SHEET REFERENCES ===\n"]
+        lines.append(f"Known sheets in document set: {', '.join(sorted(index['sheets'].keys())) or 'none identified'}\n")
+        for xref in index["cross_references"]:
+            target = xref["target_sheet"]
+            resolved = target in index["sheets"]
+            lines.append(
+                f"  Page {xref['source_page']} ({xref.get('source_sheet_id', '?')}): "
+                f"\"{xref['text']}\" -> target {target} "
+                f"{'[FOUND]' if resolved else '[NOT FOUND]'} [doc:{xref['source_document_id'][:8]}]"
+            )
+        sections["sheet_references"] = "\n".join(lines)
+
+    # Circuit completeness section
+    if index["circuits"]:
+        lines = ["=== CIRCUIT REFERENCES (by panel:circuit across all pages) ===\n"]
+        for key, circs in sorted(index["circuits"].items()):
+            page_types = set(c.get("page_type", "?") for c in circs)
+            if len(circs) < 2 and len(page_types) <= 1:
+                continue
+            lines.append(f"\n{key}: (appears on {len(circs)} pages, types: {', '.join(page_types)})")
+            for c in circs:
+                wire_str = f", wire={c['wire_size']}" if c.get("wire_size") else ""
+                lines.append(
+                    f"  Page {c['page_number']} ({c.get('sheet_id', '?')}, {c['page_type']}): "
+                    f"{c.get('description', '?')}{wire_str} [doc:{c['document_id'][:8]}]"
+                )
+        sections["circuit_completeness"] = "\n".join(lines)
+
+    # Check if everything fits in one chunk
+    full_text = "\n\n".join(sections.values())
+    if len(full_text) <= max_chars:
+        return [{"categories": list(sections.keys()), "text": full_text}]
+
+    # Split into themed chunks
+    chunks = []
+    for category, text in sections.items():
+        if len(text) > max_chars:
+            # Single section too large — truncate with notice
+            text = text[:max_chars - 100] + "\n\n[TRUNCATED — data exceeds context limit]"
+        chunks.append({"categories": [category], "text": text})
+
+    return chunks
+
+
+async def run_cross_reference_analysis(
+    request: Any,
+    model_id: str,
+    index: dict,
+    user: Any,
+    custom_instructions: Optional[str] = None,
+) -> list[dict]:
+    """
+    Run cross-reference correlation analysis on the aggregated index.
+
+    Returns a list of cross-reference finding dicts ready for insertion.
+    """
+    from open_webui.utils.chat import generate_chat_completion
+
+    chunks = _build_correlation_chunks(index)
+
+    if not chunks or all(not c["text"].strip() for c in chunks):
+        log.info("No cross-reference data to analyze (no multi-page items found)")
+        return []
+
+    all_findings = []
+
+    for chunk in chunks:
+        prompt = CROSS_REFERENCE_SYSTEM_PROMPT
+        if custom_instructions:
+            prompt += f"\n\n--- Additional Instructions ---\n{custom_instructions}"
+
+        user_message = (
+            f"Analyze the following cross-reference data for inconsistencies.\n"
+            f"Categories in this batch: {', '.join(chunk['categories'])}\n\n"
+            f"{chunk['text']}"
+        )
+
+        form_data = {
+            "model": model_id,
+            "messages": [
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": user_message},
+            ],
+            "stream": False,
+            "metadata": {
+                "task": "qc_cross_reference",
+                "task_body": f"Cross-reference analysis: {', '.join(chunk['categories'])}",
+            },
+        }
+
+        try:
+            response = await generate_chat_completion(
+                request, form_data, user=user, bypass_filter=True
+            )
+
+            if hasattr(response, "body"):
+                body = b""
+                async for chunk_data in response.body_iterator:
+                    if isinstance(chunk_data, bytes):
+                        body += chunk_data
+                    else:
+                        body += chunk_data.encode()
+                response_data = json.loads(body)
+            elif isinstance(response, dict):
+                response_data = response
+            else:
+                response_data = json.loads(response)
+
+            content = ""
+            if "choices" in response_data and response_data["choices"]:
+                message = response_data["choices"][0].get("message", {})
+                content = message.get("content", "")
+            elif "message" in response_data:
+                content = response_data["message"].get("content", "")
+
+            parsed = _parse_cross_reference_response(content)
+            all_findings.extend(parsed)
+
+        except Exception as e:
+            log.error(f"Error in cross-reference analysis for {chunk['categories']}: {e}")
+
+    return all_findings
+
+
+def _parse_cross_reference_response(content: str) -> list[dict]:
+    """Parse the cross-reference LLM response into a list of finding dicts."""
+    content = content.strip()
+    if content.startswith("```"):
+        lines = content.split("\n")
+        lines = [l for l in lines if not l.strip().startswith("```")]
+        content = "\n".join(lines)
+
+    try:
+        result = json.loads(content)
+        findings = result.get("cross_reference_findings", [])
+        # Validate structure
+        validated = []
+        for f in findings:
+            if not f.get("title"):
+                continue
+            validated.append({
+                "title": f.get("title", ""),
+                "description": f.get("description", ""),
+                "severity": f.get("severity", "major"),
+                "cross_ref_type": f.get("cross_ref_type", ""),
+                "references": f.get("references", []),
+                "reasoning": f.get("reasoning", ""),
+            })
+        return validated
+    except json.JSONDecodeError:
+        log.warning("Failed to parse cross-reference response as JSON")
+        return []
 
 
 SELF_IMPROVE_SYSTEM_PROMPT = """You are a QC template optimization assistant. You analyze feedback from QC reviews to suggest improvements to QC templates.
@@ -623,6 +1198,135 @@ async def run_qc_job(
                 QCJobDocuments.update_document(doc.id, status="failed")
                 any_failed = True
 
+        # ─── Pass 2: Cross-Reference Analysis ───
+        cross_ref_config = meta.get("cross_reference_analysis", {})
+        cross_ref_enabled = cross_ref_config.get("enabled", False)
+        cross_ref_findings_count = 0
+
+        if cross_ref_enabled and not all_failed:
+            log.info(f"Starting cross-reference analysis for job {job_id}")
+
+            # Update progress
+            progress_meta = {**(job.meta or {}), "progress": {
+                "phase": "cross_reference_extraction",
+                "detail": "Extracting structured data from pages...",
+            }}
+            QCJobs.update_job_status(job_id, "running", meta=progress_meta)
+
+            # Step A: Extract structured data from each page
+            documents_data = []
+            for doc in documents:
+                doc_meta = doc.meta or {}
+                page_images = doc_meta.get("page_images", {})
+                if not page_images:
+                    continue
+
+                pdf_path = doc_pdf_paths.get(doc.id)
+                page_extractions = {}
+
+                for page_str, clean_file_id in page_images.items():
+                    page_num = int(page_str)
+
+                    # Get page image for vision extraction (if needed)
+                    page_image_b64 = None
+                    try:
+                        file_record = Files.get_file_by_id(clean_file_id)
+                        if file_record:
+                            fp = Storage.get_file(file_record.path)
+                            with open(fp, "rb") as f:
+                                page_image_b64 = image_to_base64(f.read())
+                    except Exception as e:
+                        log.debug(f"Could not load page image for extraction: {e}")
+
+                    try:
+                        extracted = await extract_page_structured_data(
+                            request, model_id, pdf_path, page_num,
+                            page_image_b64, user,
+                        )
+                        page_extractions[str(page_num)] = extracted
+                    except Exception as e:
+                        log.warning(f"Extraction failed for doc {doc.id} page {page_num}: {e}")
+
+                # Store extracted data in document meta
+                if page_extractions:
+                    updated_meta = {**(doc.meta or {}), "extracted_data": page_extractions}
+                    QCJobDocuments.update_document(doc.id, meta=updated_meta)
+
+                # Get document name for the index
+                doc_name = "Unknown"
+                try:
+                    file_record = Files.get_file_by_id(doc.file_id)
+                    if file_record:
+                        doc_name = (file_record.meta or {}).get("name", file_record.filename)
+                except Exception:
+                    pass
+
+                documents_data.append({
+                    "document_id": doc.id,
+                    "document_name": doc_name,
+                    "pages": page_extractions,
+                })
+
+            # Step B: Build index and run correlation
+            if documents_data:
+                progress_meta = {**(job.meta or {}), "progress": {
+                    "phase": "cross_reference_correlation",
+                    "detail": f"Cross-referencing data across {total_pages} pages...",
+                }}
+                QCJobs.update_job_status(job_id, "running", meta=progress_meta)
+
+                xref_index = build_cross_reference_index(documents_data)
+
+                xref_findings = await run_cross_reference_analysis(
+                    request, model_id, xref_index, user,
+                    custom_instructions=system_prompt if system_prompt != QC_SYSTEM_PROMPT else None,
+                )
+
+                # Insert cross-reference findings
+                for xref_finding in xref_findings:
+                    refs = xref_finding.get("references", [])
+                    # Use first reference as the primary location
+                    primary_doc_id = refs[0]["document_id"] if refs else None
+                    primary_page = refs[0]["page_number"] if refs else None
+                    primary_ref_text = refs[0].get("reference_text") if refs else None
+
+                    finding_number = QCFindings.get_next_finding_number(job_id)
+                    finding_data = {
+                        "id": str(uuid.uuid4()),
+                        "job_id": job_id,
+                        "document_id": primary_doc_id,
+                        "user_id": user.id,
+                        "source": "cross_reference",
+                        "finding_number": finding_number,
+                        "page_number": primary_page,
+                        "checklist_item_id": None,
+                        "severity": xref_finding.get("severity", "major"),
+                        "status": "open",
+                        "title": xref_finding.get("title", "Cross-Reference Issue"),
+                        "description": xref_finding.get("description", ""),
+                        "location": None,
+                        "ai_response": {
+                            "reasoning": xref_finding.get("reasoning", ""),
+                        },
+                        "meta": {
+                            "source": "cross_reference",
+                            "cross_ref_type": xref_finding.get("cross_ref_type", ""),
+                            "references": refs,
+                            "reference_text": primary_ref_text,
+                            "location_source": "cross_reference",
+                        },
+                        "created_at": int(time.time()),
+                        "updated_at": int(time.time()),
+                    }
+                    QCFindings.insert_finding_raw(finding_data)
+                    total_findings += 1
+                    cross_ref_findings_count += 1
+
+                log.info(
+                    f"Cross-reference analysis complete for job {job_id}: "
+                    f"{cross_ref_findings_count} findings"
+                )
+
         # Determine overall result
         findings = QCFindings.get_findings_by_job_id(job_id)
         has_critical = any(f.severity == "critical" for f in findings)
@@ -643,9 +1347,11 @@ async def run_qc_job(
 
         job_meta = {
             **(job.meta or {}),
+            "progress": None,  # Clear progress indicator
             "statistics": {
                 "pages_analyzed": total_pages,
                 "findings_count": total_findings,
+                "cross_ref_findings_count": cross_ref_findings_count,
                 "critical_count": sum(1 for f in findings if f.severity == "critical"),
                 "major_count": sum(1 for f in findings if f.severity == "major"),
                 "minor_count": sum(1 for f in findings if f.severity == "minor"),
