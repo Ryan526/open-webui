@@ -261,16 +261,8 @@ def render_annotated_page(
     return buf.getvalue()
 
 
-def image_to_base64(image_bytes: bytes, max_dimension: int = 8000) -> str:
-    """Convert image bytes to base64 data URL, resizing if any dimension exceeds max_dimension."""
-    img = Image.open(io.BytesIO(image_bytes))
-    w, h = img.size
-    if w > max_dimension or h > max_dimension:
-        scale = max_dimension / max(w, h)
-        img = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
-        buf = io.BytesIO()
-        img.save(buf, format="PNG")
-        image_bytes = buf.getvalue()
+def image_to_base64(image_bytes: bytes) -> str:
+    """Convert image bytes to base64 data URL."""
     b64 = base64.b64encode(image_bytes).decode("utf-8")
     return f"data:image/png;base64,{b64}"
 
