@@ -1118,55 +1118,48 @@ async def run_qc_job(
                                 [ai_location] if ai_location else [None]
                             )
 
-                        # Collapse multiple locations into a single finding
-                        if len(locations_to_create) > 1:
-                            final_location = locations_to_create
-                        elif len(locations_to_create) == 1:
-                            final_location = locations_to_create[0]
-                        else:
-                            final_location = None
-
-                        finding_data = {
-                            "id": str(uuid.uuid4()),
-                            "job_id": job_id,
-                            "document_id": doc.id,
-                            "user_id": user.id,
-                            "source": "ai",
-                            "finding_number": finding_number,
-                            "page_number": page_num,
-                            "checklist_item_id": ai_finding.get(
-                                "checklist_item_id"
-                            ),
-                            "severity": ai_finding.get("severity", "info"),
-                            "status": "open",
-                            "title": ai_finding.get(
-                                "title", "Untitled Finding"
-                            ),
-                            "description": ai_finding.get(
-                                "description", ""
-                            ),
-                            "location": final_location,
-                            "ai_response": {
-                                "reasoning": ai_finding.get(
-                                    "reasoning", ""
+                        for loc in locations_to_create:
+                            finding_data = {
+                                "id": str(uuid.uuid4()),
+                                "job_id": job_id,
+                                "document_id": doc.id,
+                                "user_id": user.id,
+                                "source": "ai",
+                                "finding_number": finding_number,
+                                "page_number": page_num,
+                                "checklist_item_id": ai_finding.get(
+                                    "checklist_item_id"
                                 ),
-                                "page_summary": result.get(
-                                    "page_summary", ""
+                                "severity": ai_finding.get("severity", "info"),
+                                "status": "open",
+                                "title": ai_finding.get(
+                                    "title", "Untitled Finding"
                                 ),
-                                "page_result": result.get(
-                                    "page_result", ""
+                                "description": ai_finding.get(
+                                    "description", ""
                                 ),
-                            },
-                            "meta": {
-                                "reference_text": ref_text,
-                                "location_source": location_source,
-                            },
-                            "created_at": int(time.time()),
-                            "updated_at": int(time.time()),
-                        }
-                        QCFindings.insert_finding_raw(finding_data)
-                        page_findings_data.append(finding_data)
-                        total_findings += 1
+                                "location": loc,
+                                "ai_response": {
+                                    "reasoning": ai_finding.get(
+                                        "reasoning", ""
+                                    ),
+                                    "page_summary": result.get(
+                                        "page_summary", ""
+                                    ),
+                                    "page_result": result.get(
+                                        "page_result", ""
+                                    ),
+                                },
+                                "meta": {
+                                    "reference_text": ref_text,
+                                    "location_source": location_source,
+                                },
+                                "created_at": int(time.time()),
+                                "updated_at": int(time.time()),
+                            }
+                            QCFindings.insert_finding_raw(finding_data)
+                            page_findings_data.append(finding_data)
+                            total_findings += 1
 
                         finding_number += 1
 
