@@ -1,36 +1,60 @@
 <script lang="ts">
-	import { getContext } from 'svelte';
+	import { getContext, createEventDispatcher } from 'svelte';
 	import { getQCPageImageFileUrl } from '$lib/apis/qc';
 
 	const i18n = getContext('i18n');
+	const dispatch = createEventDispatcher();
 
 	export let documents: any[];
 	export let jobId: string;
 	export let selectedDocIndex: number;
 	export let selectedPage: number;
 	export let showAnnotated: boolean;
+	export let findings: any[] = [];
+	export let annotationMode: boolean = false;
+	export let highlightedFindingId: string | null = null;
+	export let annotationOpacity: number = 1;
+
+	// Severity color map
+	const SEVERITY_COLORS: Record<string, { fill: string; stroke: string }> = {
+		critical: { fill: 'rgba(239,68,68,0.15)', stroke: 'rgb(239,68,68)' },
+		major: { fill: 'rgba(249,115,22,0.15)', stroke: 'rgb(249,115,22)' },
+		minor: { fill: 'rgba(234,179,8,0.15)', stroke: 'rgb(234,179,8)' },
+		info: { fill: 'rgba(59,130,246,0.15)', stroke: 'rgb(59,130,246)' }
+	};
 
 	$: doc = documents[selectedDocIndex] || null;
 	$: pageCount = doc?.page_count || 0;
 	$: pageImages = doc?.meta?.page_images || {};
-	$: annotatedImages = doc?.meta?.annotated_images || {};
-	$: hasAnnotated = Object.keys(annotatedImages).length > 0;
 
 	$: {
 		const ps = String(selectedPage);
-		let fileId = null;
-		if (showAnnotated && hasAnnotated && annotatedImages[ps]) {
-			fileId = annotatedImages[ps];
-		} else if (pageImages[ps]) {
-			fileId = pageImages[ps];
-		}
+		const fileId = pageImages[ps] || null;
 		imageUrl = fileId ? getQCPageImageFileUrl(fileId) : null;
 	}
+
+	// Findings with location data for the current page
+	$: locatedFindings = findings.filter((f) => f.location);
 
 	let imageUrl: string | null = null;
 
 	let zoom = 1;
 	let containerEl: HTMLDivElement;
+	let svgEl: SVGSVGElement;
+
+	// Drawing state
+	let drawing = false;
+	let drawStart: { x: number; y: number } | null = null;
+	let drawCurrent: { x: number; y: number } | null = null;
+
+	$: drawRect = drawStart && drawCurrent
+		? {
+				x: Math.min(drawStart.x, drawCurrent.x),
+				y: Math.min(drawStart.y, drawCurrent.y),
+				width: Math.abs(drawCurrent.x - drawStart.x),
+				height: Math.abs(drawCurrent.y - drawStart.y)
+			}
+		: null;
 
 	const handleZoomIn = () => {
 		zoom = Math.min(3, zoom + 0.25);
@@ -43,6 +67,58 @@
 	const handleZoomReset = () => {
 		zoom = 1;
 	};
+
+	const getNormalizedPos = (e: MouseEvent) => {
+		const rect = svgEl.getBoundingClientRect();
+		return {
+			x: Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width)),
+			y: Math.max(0, Math.min(1, (e.clientY - rect.top) / rect.height))
+		};
+	};
+
+	const handleSvgMouseDown = (e: MouseEvent) => {
+		if (!annotationMode) return;
+		e.preventDefault();
+		drawing = true;
+		drawStart = getNormalizedPos(e);
+		drawCurrent = drawStart;
+	};
+
+	const handleSvgMouseMove = (e: MouseEvent) => {
+		if (!drawing) return;
+		drawCurrent = getNormalizedPos(e);
+	};
+
+	const handleSvgMouseUp = (e: MouseEvent) => {
+		if (!drawing || !drawRect) {
+			drawing = false;
+			return;
+		}
+		drawing = false;
+		// Discard if too small
+		if (drawRect.width < 0.005 || drawRect.height < 0.005) {
+			drawStart = null;
+			drawCurrent = null;
+			return;
+		}
+		dispatch('annotationComplete', {
+			location: { x: drawRect.x, y: drawRect.y, width: drawRect.width, height: drawRect.height }
+		});
+		drawStart = null;
+		drawCurrent = null;
+	};
+
+	/** Get location rects for a finding — handles single dict or list of dicts */
+	const getLocationRects = (
+		location: any
+	): Array<{ x: number; y: number; width: number; height: number }> => {
+		if (Array.isArray(location)) return location;
+		if (location && typeof location === 'object' && 'x' in location) return [location];
+		return [];
+	};
+
+	const getColors = (severity: string) =>
+		SEVERITY_COLORS[severity] || SEVERITY_COLORS.info;
 </script>
 
 <div class="flex flex-col h-full">
@@ -106,15 +182,26 @@
 
 		<!-- Controls -->
 		<div class="flex items-center gap-1">
-			{#if hasAnnotated}
-				<button
-					class="px-2 py-1 text-xs rounded-lg transition {showAnnotated
-						? 'bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300'
-						: 'hover:bg-gray-100 dark:hover:bg-gray-800'}"
-					on:click={() => (showAnnotated = !showAnnotated)}
-				>
-					{showAnnotated ? $i18n.t('Annotated') : $i18n.t('Clean')}
-				</button>
+			<button
+				class="px-2 py-1 text-xs rounded-lg transition {showAnnotated
+					? 'bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300'
+					: 'hover:bg-gray-100 dark:hover:bg-gray-800'}"
+				on:click={() => (showAnnotated = !showAnnotated)}
+				title={showAnnotated ? $i18n.t('Hide annotations') : $i18n.t('Show annotations')}
+			>
+				{showAnnotated ? $i18n.t('Annotated') : $i18n.t('Clean')}
+			</button>
+
+			{#if showAnnotated}
+				<input
+					type="range"
+					min="0.05"
+					max="1"
+					step="0.05"
+					bind:value={annotationOpacity}
+					class="w-16 h-1 rounded-lg appearance-none cursor-pointer accent-blue-500"
+					title={$i18n.t('Annotation opacity') + ': ' + Math.round(annotationOpacity * 100) + '%'}
+				/>
 			{/if}
 
 			<button
@@ -179,13 +266,93 @@
 	<div class="flex-1 overflow-auto bg-gray-50 dark:bg-gray-950" bind:this={containerEl}>
 		{#if imageUrl}
 			<div class="flex justify-center p-4" style="min-height: 100%;">
-				<img
-					src={imageUrl}
-					alt="Page {selectedPage}"
-					class="shadow-lg rounded"
+				<div
+					class="relative inline-block"
 					style="transform: scale({zoom}); transform-origin: top center;"
-					draggable="false"
-				/>
+				>
+					<img
+						src={imageUrl}
+						alt="Page {selectedPage}"
+						class="shadow-lg rounded block"
+						draggable="false"
+					/>
+					<!-- SVG finding overlay -->
+					<svg
+						bind:this={svgEl}
+						viewBox="0 0 1 1"
+						preserveAspectRatio="none"
+						class="absolute top-0 left-0 w-full h-full"
+						style="pointer-events: {annotationMode ? 'all' : 'none'}; cursor: {annotationMode ? 'crosshair' : 'default'};"
+						on:mousedown={handleSvgMouseDown}
+						on:mousemove={handleSvgMouseMove}
+						on:mouseup={handleSvgMouseUp}
+						on:mouseleave={() => { if (drawing) { drawing = false; drawStart = null; drawCurrent = null; } }}
+					>
+						<!-- Finding overlays (controlled by toggle + opacity slider) -->
+					{#if showAnnotated}
+						<g opacity={annotationOpacity}>
+							{#each locatedFindings as f, i}
+								{@const colors = getColors(f.severity)}
+								{#each getLocationRects(f.location) as loc}
+									<rect
+										x={loc.x}
+										y={loc.y}
+										width={loc.width}
+										height={loc.height}
+										fill={f.id === highlightedFindingId ? colors.stroke.replace('rgb', 'rgba').replace(')', ',0.3)') : colors.fill}
+										stroke={colors.stroke}
+										stroke-width={0.002}
+										class="finding-rect"
+										style="pointer-events: all; cursor: pointer;"
+										on:mouseenter={() => dispatch('findingHover', f.id)}
+										on:mouseleave={() => dispatch('findingHover', null)}
+										on:click|stopPropagation={() => dispatch('findingClick', { findingId: f.id })}
+									/>
+								{/each}
+								<!-- Number badge at first rect -->
+								{@const firstLoc = getLocationRects(f.location)[0]}
+								{#if firstLoc}
+									{@const badgeR = 0.012}
+									<circle
+										cx={firstLoc.x + badgeR}
+										cy={firstLoc.y + badgeR}
+										r={badgeR}
+										fill={colors.stroke}
+										style="pointer-events: all; cursor: pointer;"
+										on:click|stopPropagation={() => dispatch('findingClick', { findingId: f.id })}
+									/>
+									<text
+										x={firstLoc.x + badgeR}
+										y={firstLoc.y + badgeR}
+										text-anchor="middle"
+										dominant-baseline="central"
+										fill="white"
+										font-size={badgeR * 1.2}
+										font-weight="bold"
+										style="pointer-events: none;"
+									>
+										{f.finding_number || i + 1}
+									</text>
+								{/if}
+							{/each}
+						</g>
+					{/if}
+
+						<!-- Drawing preview -->
+						{#if drawing && drawRect}
+							<rect
+								x={drawRect.x}
+								y={drawRect.y}
+								width={drawRect.width}
+								height={drawRect.height}
+								fill="rgba(59,130,246,0.1)"
+								stroke="rgb(59,130,246)"
+								stroke-width={0.002}
+								stroke-dasharray="0.006 0.004"
+							/>
+						{/if}
+					</svg>
+				</div>
 			</div>
 		{:else if pageCount === 0}
 			<div class="flex items-center justify-center h-full text-gray-400">

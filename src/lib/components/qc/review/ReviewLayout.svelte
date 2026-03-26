@@ -32,6 +32,7 @@
 	let selectedDocIndex = 0;
 	let selectedPage = 1;
 	let showAnnotated = true;
+	let annotationOpacity = 1;
 
 	let fileInput: HTMLInputElement;
 
@@ -42,6 +43,11 @@
 	let selfImproveSuggestions: any = null;
 	let showSelfImproveDialog = false;
 
+	// Annotation state
+	let annotationMode = false;
+	let pendingAnnotation: { location: { x: number; y: number; width: number; height: number } } | null = null;
+	let highlightedFindingId: string | null = null;
+
 	$: selectedDoc = documents[selectedDocIndex] || null;
 	$: pageFindings = findings.filter(
 		(f) =>
@@ -51,7 +57,8 @@
 	$: canSelfImprove =
 		job?.status === 'completed' &&
 		job?.template_id &&
-		findings.some((f) => f.status === 'confirmed' || f.status === 'dismissed');
+		(findings.some((f) => f.status === 'confirmed' || f.status === 'dismissed') ||
+		 findings.some((f) => f.source === 'human'));
 
 	const loadJob = async () => {
 		try {
@@ -170,6 +177,15 @@
 		}
 	};
 
+	const handleAnnotationComplete = (e: CustomEvent) => {
+		pendingAnnotation = e.detail;
+		annotationMode = false;
+	};
+
+	const handleFindingClick = (e: CustomEvent) => {
+		highlightedFindingId = e.detail.findingId;
+	};
+
 	onMount(async () => {
 		await loadJob();
 		loading = false;
@@ -245,6 +261,19 @@
 				</button>
 
 				{#if job.status === 'completed'}
+					<button
+						class="px-3 py-1 text-xs rounded-lg border transition flex items-center gap-1.5 {annotationMode
+							? 'bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 border-blue-300 dark:border-blue-700'
+							: 'border-gray-200 dark:border-gray-700 hover:bg-gray-100 dark:hover:bg-gray-800'}"
+						on:click={() => (annotationMode = !annotationMode)}
+						title={$i18n.t('Draw annotation on page')}
+					>
+						<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="size-3.5">
+							<path stroke-linecap="round" stroke-linejoin="round" d="m16.862 4.487 1.687-1.688a1.875 1.875 0 1 1 2.652 2.652L6.832 19.82a4.5 4.5 0 0 1-1.897 1.13l-2.685.8.8-2.685a4.5 4.5 0 0 1 1.13-1.897L16.863 4.487Zm0 0L19.5 7.125" />
+						</svg>
+						{$i18n.t('Annotate')}
+					</button>
+
 					{#if canSelfImprove}
 						<button
 							class="px-3 py-1 text-xs rounded-lg border border-purple-300 dark:border-purple-700 text-purple-600 dark:text-purple-400 hover:bg-purple-50 dark:hover:bg-purple-900/20 transition disabled:opacity-50 flex items-center gap-1.5"
@@ -330,6 +359,13 @@
 					bind:selectedDocIndex
 					bind:selectedPage
 					bind:showAnnotated
+					bind:annotationOpacity
+					findings={pageFindings}
+					{annotationMode}
+					{highlightedFindingId}
+					on:annotationComplete={handleAnnotationComplete}
+					on:findingClick={handleFindingClick}
+					on:findingHover={(e) => (highlightedFindingId = e.detail)}
 				/>
 			</div>
 
@@ -340,9 +376,13 @@
 					{jobId}
 					{selectedDoc}
 					{selectedPage}
+					{pendingAnnotation}
+					{highlightedFindingId}
 					on:navigate={(e) => navigateToFinding(e.detail)}
 					on:navigateRef={(e) => navigateToRef(e.detail)}
 					on:refresh={loadJob}
+					on:highlight={(e) => (highlightedFindingId = e.detail)}
+					on:annotationClear={() => (pendingAnnotation = null)}
 				/>
 			</div>
 		</div>

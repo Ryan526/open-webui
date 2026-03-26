@@ -13,11 +13,16 @@
 	export let jobId: string;
 	export let selectedDoc: any;
 	export let selectedPage: number;
+	export let pendingAnnotation: { location: { x: number; y: number; width: number; height: number } } | null = null;
+	export let highlightedFindingId: string | null = null;
 
 	let severityFilter = '';
 	let statusFilter = '';
 	let sourceFilter = '';
 	let showAddFinding = false;
+
+	// Auto-open add form when an annotation is drawn
+	$: if (pendingAnnotation) { showAddFinding = true; }
 
 	// New finding form
 	let newTitle = '';
@@ -65,22 +70,34 @@
 	const handleAddFinding = async () => {
 		if (!newTitle.trim()) return;
 		try {
-			await createQCFinding(localStorage.token, jobId, {
+			const data: any = {
 				document_id: selectedDoc?.id,
 				source: 'human',
 				page_number: selectedPage,
 				severity: newSeverity,
 				title: newTitle.trim(),
 				description: newDescription.trim()
-			});
+			};
+			if (pendingAnnotation?.location) {
+				data.location = pendingAnnotation.location;
+			}
+			await createQCFinding(localStorage.token, jobId, data);
 			toast.success($i18n.t('Finding added'));
 			newTitle = '';
 			newDescription = '';
 			showAddFinding = false;
+			dispatch('annotationClear');
 			dispatch('refresh');
 		} catch (e) {
 			toast.error(`${e}`);
 		}
+	};
+
+	const handleCancelAdd = () => {
+		showAddFinding = false;
+		newTitle = '';
+		newDescription = '';
+		dispatch('annotationClear');
 	};
 </script>
 
@@ -91,7 +108,7 @@
 			<h3 class="text-sm font-medium">{$i18n.t('Findings')} ({filteredFindings.length})</h3>
 			<button
 				class="p-1 rounded hover:bg-gray-100 dark:hover:bg-gray-800 transition"
-				on:click={() => (showAddFinding = !showAddFinding)}
+				on:click={() => { if (showAddFinding) { handleCancelAdd(); } else { showAddFinding = true; } }}
 				title={$i18n.t('Add Manual Finding')}
 			>
 				<svg
@@ -167,7 +184,22 @@
 					<option value="info">Info</option>
 				</select>
 				<span class="text-xs text-gray-400">Page {selectedPage}</span>
+				{#if pendingAnnotation}
+					<span class="text-xs text-blue-500 flex items-center gap-1">
+						<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="size-3">
+							<path stroke-linecap="round" stroke-linejoin="round" d="M15 10.5a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z" />
+							<path stroke-linecap="round" stroke-linejoin="round" d="M19.5 10.5c0 7.142-7.5 11.25-7.5 11.25S4.5 17.642 4.5 10.5a7.5 7.5 0 1 1 15 0Z" />
+						</svg>
+						{$i18n.t('Location marked')}
+					</span>
+				{/if}
 				<div class="flex-1"></div>
+				<button
+					class="px-2 py-1 text-xs text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 transition"
+					on:click={handleCancelAdd}
+				>
+					{$i18n.t('Cancel')}
+				</button>
 				<button
 					class="px-2 py-1 text-xs bg-black text-white dark:bg-white dark:text-black rounded-lg hover:opacity-90 transition"
 					on:click={handleAddFinding}
@@ -189,10 +221,12 @@
 				{#each sortedFindings as finding}
 					<FindingCard
 						{finding}
+						highlighted={finding.id === highlightedFindingId}
 						on:navigate={() => dispatch('navigate', finding)}
 						on:navigateRef={(e) => dispatch('navigateRef', e.detail)}
 						on:statusChange={(e) => handleStatusChange(finding.id, e.detail)}
 						on:delete={() => handleDelete(finding.id)}
+						on:highlight={(e) => dispatch('highlight', e.detail)}
 					/>
 				{/each}
 			</div>

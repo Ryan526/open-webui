@@ -6,8 +6,15 @@
 	const dispatch = createEventDispatcher();
 
 	export let finding: any;
+	export let highlighted: boolean = false;
 
 	let expanded = false;
+	let cardEl: HTMLDivElement;
+
+	$: if (highlighted && cardEl) {
+		cardEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+	}
+
 	let showDismissalInput = false;
 	let dismissalReason = '';
 
@@ -34,7 +41,12 @@
 	};
 </script>
 
-<div class="px-3 py-2.5 hover:bg-gray-50 dark:hover:bg-gray-850/50 transition">
+<div
+	bind:this={cardEl}
+	class="px-3 py-2.5 hover:bg-gray-50 dark:hover:bg-gray-850/50 transition {highlighted ? 'bg-blue-50 dark:bg-blue-900/20 ring-1 ring-blue-300 dark:ring-blue-700' : ''}"
+	on:mouseenter={() => dispatch('highlight', finding.id)}
+	on:mouseleave={() => dispatch('highlight', null)}
+>
 	<!-- Header row -->
 	<div class="flex items-start gap-2">
 		<!-- Finding number badge -->

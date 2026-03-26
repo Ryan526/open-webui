@@ -421,10 +421,11 @@ async def self_improve_template(
 
     findings = QCFindings.get_findings_by_job_id(job_id)
     has_reviewed = any(f.status in ("confirmed", "dismissed") for f in findings)
-    if not has_reviewed:
+    has_human = any(f.source == "human" for f in findings)
+    if not has_reviewed and not has_human:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="At least one finding must be confirmed or dismissed",
+            detail="At least one finding must be confirmed, dismissed, or manually added",
         )
 
     from open_webui.utils.qc_analysis import generate_self_improve_suggestions
