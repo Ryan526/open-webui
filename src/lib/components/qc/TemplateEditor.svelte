@@ -4,11 +4,12 @@
 	import { goto } from '$app/navigation';
 	import { v4 as uuidv4 } from 'uuid';
 
-	import { getQCTemplateById, createQCTemplate, updateQCTemplate } from '$lib/apis/qc';
+	import { getQCTemplateById, createQCTemplate, updateQCTemplate, getQCSystemPrompts } from '$lib/apis/qc';
 	import { getKnowledgeById } from '$lib/apis/knowledge';
 	import { models } from '$lib/stores';
 	import Spinner from '$lib/components/common/Spinner.svelte';
 	import Tooltip from '$lib/components/common/Tooltip.svelte';
+	import Collapsible from '$lib/components/common/Collapsible.svelte';
 	import KnowledgeSelector from '$lib/components/workspace/Models/Knowledge/KnowledgeSelector.svelte';
 
 	const i18n = getContext('i18n');
@@ -31,6 +32,22 @@
 			enabled: false,
 			categories: ['equipment_tags', 'wire_sizes', 'cross_sheet_refs', 'load_calcs']
 		}
+	};
+
+	// Backend system prompts (lazy-loaded)
+	let systemPrompts: any = null;
+	let systemPromptsOpen = false;
+	let systemPromptsLoading = false;
+
+	const loadSystemPrompts = async () => {
+		if (systemPrompts || systemPromptsLoading) return;
+		systemPromptsLoading = true;
+		try {
+			systemPrompts = await getQCSystemPrompts(localStorage.token);
+		} catch (e) {
+			toast.error(`Failed to load system prompts: ${e}`);
+		}
+		systemPromptsLoading = false;
 	};
 
 	// Knowledge bases
@@ -250,6 +267,69 @@
 					class="w-full text-sm rounded-xl border border-gray-200 dark:border-gray-800 bg-transparent px-3 py-2 outline-none font-mono"
 				></textarea>
 			</div>
+
+			<!-- Backend System Prompts (read-only) -->
+			<Collapsible
+				title={$i18n.t('Backend System Prompts')}
+				className="rounded-xl border border-gray-200 dark:border-gray-800 p-3"
+				buttonClassName="w-full text-sm font-medium text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 transition cursor-pointer"
+				bind:open={systemPromptsOpen}
+				onChange={(isOpen) => { if (isOpen) loadSystemPrompts(); }}
+			>
+				<div slot="content" class="mt-3 space-y-3">
+					{#if systemPromptsLoading}
+						<div class="flex justify-center py-4">
+							<Spinner className="size-4" />
+						</div>
+					{:else if systemPrompts}
+						<div class="text-xs text-gray-500 bg-gray-50 dark:bg-gray-900 rounded-lg p-3">
+							<p class="font-medium mb-1">{$i18n.t('Prompt assembly order:')}</p>
+							<ol class="list-decimal list-inside space-y-0.5">
+								<li>{$i18n.t('Base QC system prompt (below)')}</li>
+								<li>{$i18n.t('Your custom system prompt (above)')}</li>
+								<li>{$i18n.t('Knowledge base context (if attached)')}</li>
+								<li>{$i18n.t('Checklist criteria (if defined)')}</li>
+							</ol>
+						</div>
+
+						<Collapsible
+							title={$i18n.t('Base QC Prompt (Page Analysis)')}
+							buttonClassName="w-full text-xs font-medium text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 transition cursor-pointer"
+						>
+							<div slot="content">
+								<pre class="mt-2 whitespace-pre-wrap font-mono text-xs max-h-64 overflow-y-auto bg-gray-50 dark:bg-gray-900 rounded-lg p-3">{systemPrompts.qc_system_prompt}</pre>
+							</div>
+						</Collapsible>
+
+						<Collapsible
+							title={$i18n.t('Data Extraction Prompt (Cross-Reference)')}
+							buttonClassName="w-full text-xs font-medium text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 transition cursor-pointer"
+						>
+							<div slot="content">
+								<pre class="mt-2 whitespace-pre-wrap font-mono text-xs max-h-64 overflow-y-auto bg-gray-50 dark:bg-gray-900 rounded-lg p-3">{systemPrompts.extraction_system_prompt}</pre>
+							</div>
+						</Collapsible>
+
+						<Collapsible
+							title={$i18n.t('Cross-Reference Analysis Prompt')}
+							buttonClassName="w-full text-xs font-medium text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 transition cursor-pointer"
+						>
+							<div slot="content">
+								<pre class="mt-2 whitespace-pre-wrap font-mono text-xs max-h-64 overflow-y-auto bg-gray-50 dark:bg-gray-900 rounded-lg p-3">{systemPrompts.cross_reference_system_prompt}</pre>
+							</div>
+						</Collapsible>
+
+						<Collapsible
+							title={$i18n.t('Template Self-Improvement Prompt')}
+							buttonClassName="w-full text-xs font-medium text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 transition cursor-pointer"
+						>
+							<div slot="content">
+								<pre class="mt-2 whitespace-pre-wrap font-mono text-xs max-h-64 overflow-y-auto bg-gray-50 dark:bg-gray-900 rounded-lg p-3">{systemPrompts.self_improve_system_prompt}</pre>
+							</div>
+						</Collapsible>
+					{/if}
+				</div>
+			</Collapsible>
 
 			<!-- DPI Setting -->
 			<div>

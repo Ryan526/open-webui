@@ -70,6 +70,28 @@ def _check_qc_access(request, user):
         )
 
 
+############################
+# System Prompts (read-only)
+############################
+
+
+@router.get("/system-prompts")
+async def get_system_prompts(request: Request, user=Depends(get_verified_user)):
+    _check_qc_access(request, user)
+    from open_webui.utils.qc_analysis import (
+        QC_SYSTEM_PROMPT,
+        EXTRACTION_SYSTEM_PROMPT,
+        CROSS_REFERENCE_SYSTEM_PROMPT,
+        SELF_IMPROVE_SYSTEM_PROMPT,
+    )
+    return {
+        "qc_system_prompt": QC_SYSTEM_PROMPT,
+        "extraction_system_prompt": EXTRACTION_SYSTEM_PROMPT,
+        "cross_reference_system_prompt": CROSS_REFERENCE_SYSTEM_PROMPT,
+        "self_improve_system_prompt": SELF_IMPROVE_SYSTEM_PROMPT,
+    }
+
+
 def _check_job_access(job, user, write=False):
     """Check if user can access a job."""
     if not job:
