@@ -76,18 +76,39 @@ def _check_qc_access(request, user):
 
 
 @router.get("/system-prompts")
-async def get_system_prompts(request: Request, user=Depends(get_verified_user)):
+async def get_system_prompts(
+    request: Request,
+    categories: Optional[str] = Query(None),
+    user=Depends(get_verified_user),
+):
     _check_qc_access(request, user)
     from open_webui.utils.qc_analysis import (
         QC_SYSTEM_PROMPT,
         EXTRACTION_SYSTEM_PROMPT,
         CROSS_REFERENCE_SYSTEM_PROMPT,
         SELF_IMPROVE_SYSTEM_PROMPT,
+        build_extraction_prompt,
+        build_correlation_prompt,
+        _migrate_legacy_categories,
     )
+
+    if categories:
+        try:
+            parsed = json.loads(categories)
+            migrated = _migrate_legacy_categories(parsed)
+            extraction_prompt = build_extraction_prompt(migrated)
+            correlation_prompt = build_correlation_prompt(migrated)
+        except (json.JSONDecodeError, TypeError):
+            extraction_prompt = EXTRACTION_SYSTEM_PROMPT
+            correlation_prompt = CROSS_REFERENCE_SYSTEM_PROMPT
+    else:
+        extraction_prompt = EXTRACTION_SYSTEM_PROMPT
+        correlation_prompt = CROSS_REFERENCE_SYSTEM_PROMPT
+
     return {
         "qc_system_prompt": QC_SYSTEM_PROMPT,
-        "extraction_system_prompt": EXTRACTION_SYSTEM_PROMPT,
-        "cross_reference_system_prompt": CROSS_REFERENCE_SYSTEM_PROMPT,
+        "extraction_system_prompt": extraction_prompt,
+        "cross_reference_system_prompt": correlation_prompt,
         "self_improve_system_prompt": SELF_IMPROVE_SYSTEM_PROMPT,
     }
 

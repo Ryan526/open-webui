@@ -30,8 +30,76 @@
 		supported_file_types: ['pdf', 'png', 'jpg'],
 		cross_reference_analysis: {
 			enabled: false,
-			categories: ['equipment_tags', 'wire_sizes', 'cross_sheet_refs', 'load_calcs']
+			categories: []
 		}
+	};
+
+	// Legacy category migration map
+	const LEGACY_CATEGORIES: Record<string, { name: string; description: string }> = {
+		equipment_tags: { name: 'Equipment Tag Consistency', description: 'Check that the same equipment tag has consistent ratings, types, and attributes across all pages where it appears.' },
+		wire_sizes: { name: 'Wire/Cable Size Verification', description: 'Check that wire/cable sizes match between schedules and plan pages for the same circuit or feeder.' },
+		cross_sheet_refs: { name: 'Cross-Sheet Reference Validity', description: 'Check that cross-sheet references (e.g., "See Detail A on E-501") point to sheets that exist in the document set.' },
+		load_calcs: { name: 'Load Calculation Consistency', description: 'Check that equipment ratings, loads, and feeder sizing are consistent across all pages.' },
+	};
+
+	const migrateLegacyCategories = (cats: any[]): any[] => {
+		if (!cats || cats.length === 0) return [];
+		if (typeof cats[0] === 'object') return cats; // Already new format
+		// Legacy string array
+		return cats
+			.filter((id: string) => id in LEGACY_CATEGORIES)
+			.map((id: string) => ({
+				id: uuidv4(),
+				name: LEGACY_CATEGORIES[id].name,
+				description: LEGACY_CATEGORIES[id].description,
+			}));
+	};
+
+	// Cross-reference category editing
+	let newCategoryName = '';
+	let newCategoryDescription = '';
+	let editingCategoryId: string | null = null;
+	let editingCategoryOriginal: { name: string; description: string } | null = null;
+
+	const startEditCategory = (cat: any) => {
+		editingCategoryOriginal = { name: cat.name, description: cat.description };
+		editingCategoryId = cat.id;
+	};
+
+	const cancelEditCategory = (cat: any) => {
+		if (editingCategoryOriginal) {
+			cat.name = editingCategoryOriginal.name;
+			cat.description = editingCategoryOriginal.description;
+			meta.cross_reference_analysis.categories = meta.cross_reference_analysis.categories;
+		}
+		editingCategoryId = null;
+		editingCategoryOriginal = null;
+	};
+
+	const saveEditCategory = () => {
+		editingCategoryId = null;
+		editingCategoryOriginal = null;
+		meta.cross_reference_analysis.categories = meta.cross_reference_analysis.categories;
+	};
+
+	const addCategory = () => {
+		if (!newCategoryName.trim()) return;
+		meta.cross_reference_analysis.categories = [
+			...meta.cross_reference_analysis.categories,
+			{
+				id: uuidv4(),
+				name: newCategoryName.trim(),
+				description: newCategoryDescription.trim()
+			}
+		];
+		newCategoryName = '';
+		newCategoryDescription = '';
+	};
+
+	const removeCategory = (id: string) => {
+		meta.cross_reference_analysis.categories = meta.cross_reference_analysis.categories.filter(
+			(c: any) => c.id !== id
+		);
 	};
 
 	// Backend system prompts (lazy-loaded)
@@ -40,10 +108,12 @@
 	let systemPromptsLoading = false;
 
 	const loadSystemPrompts = async () => {
-		if (systemPrompts || systemPromptsLoading) return;
+		if (systemPromptsLoading) return;
 		systemPromptsLoading = true;
+		systemPrompts = null;
 		try {
-			systemPrompts = await getQCSystemPrompts(localStorage.token);
+			const cats = meta.cross_reference_analysis?.categories || [];
+			systemPrompts = await getQCSystemPrompts(localStorage.token, cats.length > 0 ? cats : undefined);
 		} catch (e) {
 			toast.error(`Failed to load system prompts: ${e}`);
 		}
@@ -179,10 +249,16 @@
 						supported_file_types: ['pdf', 'png', 'jpg'],
 						cross_reference_analysis: {
 							enabled: false,
-							categories: ['equipment_tags', 'wire_sizes', 'cross_sheet_refs', 'load_calcs']
+							categories: []
 						},
 						...(template.meta || {})
 					};
+					// Migrate legacy string-based categories to object format
+					if (meta.cross_reference_analysis?.categories) {
+						meta.cross_reference_analysis.categories = migrateLegacyCategories(
+							meta.cross_reference_analysis.categories
+						);
+					}
 					if (meta.knowledge_base_ids.length > 0) {
 						await resolveKnowledgeBases(meta.knowledge_base_ids);
 					}
@@ -606,86 +682,111 @@
 				</div>
 
 				{#if meta.cross_reference_analysis.enabled}
-					<div class="mt-3 p-3 rounded-xl border border-gray-200 dark:border-gray-800 space-y-2">
-						<p class="text-xs font-medium text-gray-600 dark:text-gray-400 mb-2">
+					<div class="mt-3 p-3 rounded-xl border border-gray-200 dark:border-gray-800 space-y-3">
+						<p class="text-xs font-medium text-gray-600 dark:text-gray-400">
 							{$i18n.t('Analysis categories:')}
 						</p>
 
-						<label class="flex items-center gap-2 text-sm cursor-pointer">
-							<input
-								type="checkbox"
-								checked={meta.cross_reference_analysis.categories.includes('equipment_tags')}
-								on:change={() => {
-									const cats = meta.cross_reference_analysis.categories;
-									if (cats.includes('equipment_tags')) {
-										meta.cross_reference_analysis.categories = cats.filter((c) => c !== 'equipment_tags');
-									} else {
-										meta.cross_reference_analysis.categories = [...cats, 'equipment_tags'];
-									}
-									meta = meta;
-								}}
-								class="rounded"
-							/>
-							<span>{$i18n.t('Equipment tag consistency')}</span>
-							<span class="text-xs text-gray-400">{$i18n.t('Same tag, same ratings everywhere')}</span>
-						</label>
+						{#if meta.cross_reference_analysis.categories.length > 0}
+							<div class="space-y-2">
+								{#each meta.cross_reference_analysis.categories as cat}
+									<div class="flex items-start gap-2 p-2 rounded-lg border border-gray-200 dark:border-gray-800">
+										{#if editingCategoryId === cat.id}
+											<!-- Edit mode -->
+											<div class="flex-1 min-w-0 space-y-2">
+												<input
+													type="text"
+													bind:value={cat.name}
+													placeholder={$i18n.t('Category name...')}
+													class="w-full text-sm rounded-lg border border-gray-200 dark:border-gray-800 bg-transparent px-2 py-1 outline-none font-medium"
+												/>
+												<textarea
+													bind:value={cat.description}
+													placeholder={$i18n.t('Describe what to check for...')}
+													rows="2"
+													class="w-full text-xs rounded-lg border border-gray-200 dark:border-gray-800 bg-transparent px-2 py-1 outline-none"
+												></textarea>
+											</div>
+											<button
+												class="p-1 text-gray-400 hover:text-green-600 transition shrink-0"
+												title={$i18n.t('Save')}
+												on:click={saveEditCategory}
+											>
+												<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="size-4">
+													<path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5" />
+												</svg>
+											</button>
+											<button
+												class="p-1 text-gray-400 hover:text-red-600 transition shrink-0"
+												title={$i18n.t('Cancel')}
+												on:click={() => cancelEditCategory(cat)}
+											>
+												<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="size-4">
+													<path stroke-linecap="round" stroke-linejoin="round" d="M6 18 18 6M6 6l12 12" />
+												</svg>
+											</button>
+										{:else}
+											<!-- Display mode -->
+											<div class="flex-1 min-w-0">
+												<span class="text-sm font-medium">{cat.name}</span>
+												{#if cat.description}
+													<p class="text-xs text-gray-500 mt-0.5">{cat.description}</p>
+												{/if}
+											</div>
+											<button
+												class="p-1 text-gray-400 hover:text-blue-600 transition shrink-0"
+												title={$i18n.t('Edit')}
+												on:click={() => startEditCategory(cat)}
+											>
+												<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="size-4">
+													<path stroke-linecap="round" stroke-linejoin="round" d="m16.862 4.487 1.687-1.688a1.875 1.875 0 1 1 2.652 2.652L10.582 16.07a4.5 4.5 0 0 1-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 0 1 1.13-1.897l8.932-8.931Zm0 0L19.5 7.125M18 14v4.75A2.25 2.25 0 0 1 15.75 21H5.25A2.25 2.25 0 0 1 3 18.75V8.25A2.25 2.25 0 0 1 5.25 6H10" />
+												</svg>
+											</button>
+											<button
+												class="p-1 text-gray-400 hover:text-red-600 transition shrink-0"
+												title={$i18n.t('Delete')}
+												on:click={() => removeCategory(cat.id)}
+											>
+												<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="size-4">
+													<path stroke-linecap="round" stroke-linejoin="round" d="M6 18 18 6M6 6l12 12" />
+												</svg>
+											</button>
+										{/if}
+									</div>
+								{/each}
+							</div>
+						{:else}
+							<p class="text-xs text-gray-400 italic">
+								{$i18n.t('No categories defined. Add categories to define what cross-reference checks to perform.')}
+							</p>
+						{/if}
 
-						<label class="flex items-center gap-2 text-sm cursor-pointer">
-							<input
-								type="checkbox"
-								checked={meta.cross_reference_analysis.categories.includes('wire_sizes')}
-								on:change={() => {
-									const cats = meta.cross_reference_analysis.categories;
-									if (cats.includes('wire_sizes')) {
-										meta.cross_reference_analysis.categories = cats.filter((c) => c !== 'wire_sizes');
-									} else {
-										meta.cross_reference_analysis.categories = [...cats, 'wire_sizes'];
-									}
-									meta = meta;
-								}}
-								class="rounded"
-							/>
-							<span>{$i18n.t('Wire/cable sizing verification')}</span>
-							<span class="text-xs text-gray-400">{$i18n.t('Schedule vs. plan wire sizes match')}</span>
-						</label>
-
-						<label class="flex items-center gap-2 text-sm cursor-pointer">
-							<input
-								type="checkbox"
-								checked={meta.cross_reference_analysis.categories.includes('cross_sheet_refs')}
-								on:change={() => {
-									const cats = meta.cross_reference_analysis.categories;
-									if (cats.includes('cross_sheet_refs')) {
-										meta.cross_reference_analysis.categories = cats.filter((c) => c !== 'cross_sheet_refs');
-									} else {
-										meta.cross_reference_analysis.categories = [...cats, 'cross_sheet_refs'];
-									}
-									meta = meta;
-								}}
-								class="rounded"
-							/>
-							<span>{$i18n.t('Cross-sheet reference validation')}</span>
-							<span class="text-xs text-gray-400">{$i18n.t('"See Detail A on E-501" resolves')}</span>
-						</label>
-
-						<label class="flex items-center gap-2 text-sm cursor-pointer">
-							<input
-								type="checkbox"
-								checked={meta.cross_reference_analysis.categories.includes('load_calcs')}
-								on:change={() => {
-									const cats = meta.cross_reference_analysis.categories;
-									if (cats.includes('load_calcs')) {
-										meta.cross_reference_analysis.categories = cats.filter((c) => c !== 'load_calcs');
-									} else {
-										meta.cross_reference_analysis.categories = [...cats, 'load_calcs'];
-									}
-									meta = meta;
-								}}
-								class="rounded"
-							/>
-							<span>{$i18n.t('Load calculation consistency')}</span>
-							<span class="text-xs text-gray-400">{$i18n.t('Ratings, loads, and feeder sizing')}</span>
-						</label>
+						<!-- Add category form -->
+						<div class="space-y-2 pt-2 border-t border-gray-200 dark:border-gray-800">
+							<div class="flex gap-2 items-end">
+								<div class="flex-1">
+									<input
+										type="text"
+										bind:value={newCategoryName}
+										placeholder={$i18n.t('Category name...')}
+										class="w-full text-sm rounded-xl border border-gray-200 dark:border-gray-800 bg-transparent px-3 py-1.5 outline-none"
+										on:keydown={(e) => e.key === 'Enter' && addCategory()}
+									/>
+								</div>
+								<button
+									class="px-3 py-1.5 text-sm bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700 rounded-xl transition"
+									on:click={addCategory}
+								>
+									{$i18n.t('Add')}
+								</button>
+							</div>
+							<textarea
+								bind:value={newCategoryDescription}
+								placeholder={$i18n.t('Describe what to check for (drives extraction + correlation prompts)...')}
+								rows="2"
+								class="w-full text-sm rounded-xl border border-gray-200 dark:border-gray-800 bg-transparent px-3 py-1.5 outline-none"
+							></textarea>
+						</div>
 
 						<p class="text-xs text-gray-400 mt-2 pt-2 border-t border-gray-200 dark:border-gray-800">
 							{$i18n.t('Adds ~40-60% more analysis time. Uses text extraction + AI correlation across all pages.')}

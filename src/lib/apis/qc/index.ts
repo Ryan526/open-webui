@@ -27,9 +27,14 @@ export const getQCTemplates = async (token: string) => {
 	return res;
 };
 
-export const getQCSystemPrompts = async (token: string) => {
+export const getQCSystemPrompts = async (token: string, categories?: object[]) => {
 	let error = null;
-	const res = await fetch(`${WEBUI_API_BASE_URL}/qc/system-prompts`, {
+	const params = new URLSearchParams();
+	if (categories && categories.length > 0) {
+		params.append('categories', JSON.stringify(categories));
+	}
+	const qs = params.toString();
+	const res = await fetch(`${WEBUI_API_BASE_URL}/qc/system-prompts${qs ? '?' + qs : ''}`, {
 		method: 'GET',
 		headers: {
 			Accept: 'application/json',
