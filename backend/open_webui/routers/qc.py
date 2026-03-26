@@ -87,6 +87,7 @@ async def get_system_prompts(
         EXTRACTION_SYSTEM_PROMPT,
         CROSS_REFERENCE_SYSTEM_PROMPT,
         SELF_IMPROVE_SYSTEM_PROMPT,
+        CHECKLIST_ASSIST_SYSTEM_PROMPT,
         build_extraction_prompt,
         build_correlation_prompt,
         _migrate_legacy_categories,
@@ -110,6 +111,7 @@ async def get_system_prompts(
         "extraction_system_prompt": extraction_prompt,
         "cross_reference_system_prompt": correlation_prompt,
         "self_improve_system_prompt": SELF_IMPROVE_SYSTEM_PROMPT,
+        "checklist_assist_system_prompt": CHECKLIST_ASSIST_SYSTEM_PROMPT,
     }
 
 
@@ -166,6 +168,40 @@ def _check_template_access(template, user, write=False):
 ############################
 # Template Endpoints
 ############################
+
+
+@router.post("/templates/ai-assist-checklist")
+async def ai_assist_checklist(
+    request: Request,
+    form_data: dict,
+    user=Depends(get_verified_user),
+):
+    """Use AI to generate or suggest checklist items from knowledge base content."""
+    _check_qc_access(request, user)
+
+    knowledge_base_ids = form_data.get("knowledge_base_ids", [])
+    if not knowledge_base_ids:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="At least one knowledge base must be provided",
+        )
+
+    model_id = form_data.get("model_id")
+    if not model_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="A model must be selected",
+        )
+
+    existing_checklist = form_data.get("existing_checklist")
+
+    from open_webui.utils.qc_analysis import generate_checklist_suggestions
+
+    suggestions = await generate_checklist_suggestions(
+        request, knowledge_base_ids, model_id, existing_checklist, user
+    )
+
+    return suggestions
 
 
 @router.get("/templates", response_model=list[QCTemplateModel])

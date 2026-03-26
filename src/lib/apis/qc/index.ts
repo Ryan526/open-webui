@@ -170,6 +170,37 @@ export const deleteQCTemplate = async (token: string, id: string) => {
 	return res;
 };
 
+export const aiAssistChecklist = async (
+	token: string,
+	data: {
+		knowledge_base_ids: string[];
+		model_id?: string;
+		existing_checklist?: object[];
+	}
+) => {
+	let error = null;
+	const res = await fetch(`${WEBUI_API_BASE_URL}/qc/templates/ai-assist-checklist`, {
+		method: 'POST',
+		headers: {
+			Accept: 'application/json',
+			'Content-Type': 'application/json',
+			authorization: `Bearer ${token}`
+		},
+		body: JSON.stringify(data)
+	})
+		.then(async (res) => {
+			if (!res.ok) throw await res.json();
+			return res.json();
+		})
+		.catch((err) => {
+			error = err.detail;
+			console.error(err);
+			return null;
+		});
+	if (error) throw error;
+	return res;
+};
+
 export const cloneQCTemplate = async (token: string, id: string) => {
 	let error = null;
 	const res = await fetch(`${WEBUI_API_BASE_URL}/qc/templates/${id}/clone`, {

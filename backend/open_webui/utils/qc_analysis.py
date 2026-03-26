@@ -797,6 +797,181 @@ def _parse_cross_reference_response(content: str) -> list[dict]:
         return []
 
 
+CHECKLIST_ASSIST_SYSTEM_PROMPT = """You are a QC checklist generation assistant. You analyze knowledge base content (standards documents, specifications, codes) and produce checklist items for quality control reviews.
+
+You will receive:
+1. Content from one or more knowledge bases (standards, specifications, reference documents)
+2. Optionally, an existing checklist of items already defined
+
+Your task depends on the mode:
+
+**Generate mode** (no existing checklist): Create a comprehensive checklist of items to check during QC review, based entirely on what the knowledge base documents require or specify.
+
+**Suggest mode** (existing checklist provided): Review the existing checklist against the knowledge base content and suggest:
+- New items to add (things the KBs require that aren't covered)
+- Modifications to existing items (better descriptions, corrected severity, etc.)
+- Items to remove (if they contradict or are not supported by the KB content)
+
+Return your response as a JSON object with this exact structure:
+{
+  "summary": "Brief description of what was found in the knowledge bases",
+  "checklist_changes": [
+    { "action": "add", "item": { "label": "Concise check item name", "description": "What specifically to verify and why", "severity": "critical|major|minor|info" }, "reason": "Which KB content/section supports this item" },
+    { "action": "modify", "item_id": "id-of-existing-item", "updates": { "label": "Updated label", "description": "Updated description", "severity": "updated-severity" }, "reason": "Why this modification is needed based on KB content" },
+    { "action": "remove", "item_id": "id-of-item-to-remove", "reason": "Why this item should be removed based on KB content" }
+  ]
+}
+
+Guidelines:
+- Focus on actionable, specific checklist items that a reviewer can verify on a document page
+- Severity guide: critical = safety/code violation, major = significant compliance issue, minor = best practice deviation, info = informational check
+- Reference specific sections, clauses, or requirements from the KB documents in your reasons
+- In generate mode, only use "add" actions. In suggest mode, all three action types are allowed.
+- Be thorough but avoid redundant items — each item should check something distinct
+- Keep labels concise (under 80 characters) and descriptions detailed enough to be actionable
+- Return ONLY valid JSON, no markdown code blocks or other text"""
+
+
+async def generate_checklist_suggestions(
+    request: Any,
+    knowledge_base_ids: list[str],
+    model_id: str,
+    existing_checklist: Optional[list[dict]],
+    user: Any,
+) -> dict:
+    """
+    Analyze knowledge base content and generate/suggest checklist items.
+    Returns a dict with summary and checklist_changes.
+    """
+    from open_webui.models.knowledge import Knowledges
+    from open_webui.utils.chat import generate_chat_completion
+
+    # Fetch KB content
+    kb_parts = []
+    for kb_id in knowledge_base_ids:
+        try:
+            kb_files = Knowledges.get_files_by_id(kb_id)
+            for f in kb_files:
+                file_content = (f.data or {}).get("content", "")
+                if file_content:
+                    file_name = (f.meta or {}).get("name", f.filename)
+                    kb_parts.append(f"=== {file_name} ===\n{file_content}")
+        except Exception as e:
+            log.warning(f"Failed to fetch KB {kb_id} content: {e}")
+
+    if not kb_parts:
+        return {
+            "summary": "No content found in the selected knowledge bases.",
+            "checklist_changes": [],
+            "error": True,
+        }
+
+    kb_context = "\n\n".join(kb_parts)
+    max_kb_chars = 500_000
+    if len(kb_context) > max_kb_chars:
+        log.warning(
+            f"KB context truncated from {len(kb_context)} to {max_kb_chars} chars"
+        )
+        kb_context = kb_context[:max_kb_chars]
+
+    # Build user message
+    if existing_checklist:
+        mode_text = "Suggest mode: review the existing checklist and suggest additions, modifications, or removals."
+        checklist_text = "\n--- Existing Checklist ---\n"
+        for item in existing_checklist:
+            severity = item.get("severity", "info")
+            label = item.get("label", "")
+            desc = item.get("description", "")
+            item_id = item.get("id", "")
+            checklist_text += f"- [{severity.upper()}] {label} (id: {item_id}): {desc}\n"
+    else:
+        mode_text = "Generate mode: create a comprehensive checklist from scratch based on the knowledge base content."
+        checklist_text = ""
+
+    user_message = f"""{mode_text}
+
+--- Knowledge Base Content ---
+{kb_context}
+{checklist_text}
+Based on the knowledge base content above, provide checklist items for QC document review."""
+
+    form_data = {
+        "model": model_id,
+        "messages": [
+            {"role": "system", "content": CHECKLIST_ASSIST_SYSTEM_PROMPT},
+            {"role": "user", "content": user_message},
+        ],
+        "stream": False,
+        "metadata": {
+            "task": "qc_checklist_assist",
+            "task_body": "AI-assisted checklist generation from knowledge bases",
+        },
+    }
+
+    try:
+        response = await generate_chat_completion(
+            request,
+            form_data,
+            user=user,
+            bypass_filter=True,
+        )
+
+        if hasattr(response, "body"):
+            body = b""
+            async for chunk in response.body_iterator:
+                if isinstance(chunk, bytes):
+                    body += chunk
+                else:
+                    body += chunk.encode()
+            response_data = json.loads(body)
+        elif isinstance(response, dict):
+            response_data = response
+        else:
+            response_data = json.loads(response)
+
+        content = ""
+        if "choices" in response_data and response_data["choices"]:
+            message = response_data["choices"][0].get("message", {})
+            content = message.get("content", "")
+        elif "message" in response_data:
+            content = response_data["message"].get("content", "")
+
+        return _parse_checklist_assist_response(content)
+
+    except Exception as e:
+        log.error(f"Error generating checklist suggestions: {e}")
+        return {
+            "summary": f"Failed to generate suggestions: {str(e)}",
+            "checklist_changes": [],
+            "error": True,
+        }
+
+
+def _parse_checklist_assist_response(content: str) -> dict:
+    """Parse the checklist assist LLM response into structured suggestions."""
+    content = content.strip()
+
+    if content.startswith("```"):
+        lines = content.split("\n")
+        lines = [l for l in lines if not l.strip().startswith("```")]
+        content = "\n".join(lines)
+
+    try:
+        result = json.loads(content)
+        if "summary" not in result:
+            result["summary"] = "Checklist suggestions generated"
+        if "checklist_changes" not in result:
+            result["checklist_changes"] = []
+        return result
+    except json.JSONDecodeError:
+        return {
+            "summary": "Could not parse AI response as structured suggestions.",
+            "checklist_changes": [],
+            "raw_response": content[:2000],
+            "error": True,
+        }
+
+
 SELF_IMPROVE_SYSTEM_PROMPT = """You are a QC template optimization assistant. You analyze feedback from QC reviews to suggest improvements to QC templates.
 
 You will receive:

@@ -4,7 +4,7 @@
 	import { goto } from '$app/navigation';
 	import { v4 as uuidv4 } from 'uuid';
 
-	import { getQCTemplateById, createQCTemplate, updateQCTemplate, getQCSystemPrompts } from '$lib/apis/qc';
+	import { getQCTemplateById, createQCTemplate, updateQCTemplate, getQCSystemPrompts, aiAssistChecklist } from '$lib/apis/qc';
 	import { getKnowledgeById } from '$lib/apis/knowledge';
 	import { models } from '$lib/stores';
 	import Spinner from '$lib/components/common/Spinner.svelte';
@@ -196,6 +196,136 @@
 		newChecklistLabel = '';
 		newChecklistDescription = '';
 		newChecklistSeverity = 'minor';
+	};
+
+	// AI Assist state
+	let aiAssistLoading = false;
+	let aiSuggestions: any = null;
+
+	const handleAiAssist = async () => {
+		if (meta.knowledge_base_ids.length === 0) {
+			toast.error($i18n.t('Attach at least one knowledge base first'));
+			return;
+		}
+		if (!model_id) {
+			toast.error($i18n.t('Select a model first'));
+			return;
+		}
+
+		aiAssistLoading = true;
+		aiSuggestions = null;
+		try {
+			const isGenerate = !meta.checklist || meta.checklist.length === 0;
+			const result = await aiAssistChecklist(localStorage.token, {
+				knowledge_base_ids: meta.knowledge_base_ids,
+				model_id,
+				existing_checklist: isGenerate ? [] : meta.checklist
+			});
+
+			if (!result || result.error) {
+				toast.error(result?.summary || $i18n.t('Failed to get AI suggestions'));
+				aiAssistLoading = false;
+				return;
+			}
+
+			if (isGenerate) {
+				// Generate mode: directly populate checklist
+				const addItems = (result.checklist_changes || []).filter((c: any) => c.action === 'add');
+				if (addItems.length > 0) {
+					const newItems = addItems.map((c: any) => ({
+						id: uuidv4(),
+						label: c.item?.label || '',
+						description: c.item?.description || '',
+						severity: c.item?.severity || 'minor'
+					})).filter((item: any) => item.label);
+					meta.checklist = [...meta.checklist, ...newItems];
+					toast.success($i18n.t('Generated {{count}} checklist items from knowledge bases', { count: newItems.length }));
+				} else {
+					toast.info($i18n.t('No checklist items were suggested'));
+				}
+			} else {
+				// Suggest mode: show suggestions panel
+				if (result.checklist_changes && result.checklist_changes.length > 0) {
+					aiSuggestions = result;
+				} else {
+					toast.info($i18n.t('No suggestions — the checklist looks comprehensive'));
+				}
+			}
+		} catch (e) {
+			toast.error(`${e}`);
+		}
+		aiAssistLoading = false;
+	};
+
+	const acceptSuggestion = (index: number) => {
+		if (!aiSuggestions) return;
+		const change = aiSuggestions.checklist_changes[index];
+		if (change.action === 'add') {
+			meta.checklist = [...meta.checklist, {
+				id: uuidv4(),
+				label: change.item?.label || '',
+				description: change.item?.description || '',
+				severity: change.item?.severity || 'minor'
+			}];
+		} else if (change.action === 'modify' && change.item_id) {
+			meta.checklist = meta.checklist.map((item: any) => {
+				if (item.id === change.item_id) {
+					return { ...item, ...(change.updates || {}) };
+				}
+				return item;
+			});
+		} else if (change.action === 'remove' && change.item_id) {
+			meta.checklist = meta.checklist.filter((item: any) => item.id !== change.item_id);
+		}
+		// Remove from suggestions
+		aiSuggestions.checklist_changes = aiSuggestions.checklist_changes.filter((_: any, i: number) => i !== index);
+		if (aiSuggestions.checklist_changes.length === 0) {
+			aiSuggestions = null;
+		}
+	};
+
+	const dismissSuggestion = (index: number) => {
+		if (!aiSuggestions) return;
+		aiSuggestions.checklist_changes = aiSuggestions.checklist_changes.filter((_: any, i: number) => i !== index);
+		if (aiSuggestions.checklist_changes.length === 0) {
+			aiSuggestions = null;
+		}
+	};
+
+	const acceptAllSuggestions = () => {
+		if (!aiSuggestions) return;
+		// Process in order: removes first, then modifies, then adds
+		const removes = aiSuggestions.checklist_changes.filter((c: any) => c.action === 'remove');
+		const modifies = aiSuggestions.checklist_changes.filter((c: any) => c.action === 'modify');
+		const adds = aiSuggestions.checklist_changes.filter((c: any) => c.action === 'add');
+
+		for (const change of removes) {
+			if (change.item_id) {
+				meta.checklist = meta.checklist.filter((item: any) => item.id !== change.item_id);
+			}
+		}
+		for (const change of modifies) {
+			if (change.item_id) {
+				meta.checklist = meta.checklist.map((item: any) => {
+					if (item.id === change.item_id) {
+						return { ...item, ...(change.updates || {}) };
+					}
+					return item;
+				});
+			}
+		}
+		for (const change of adds) {
+			meta.checklist = [...meta.checklist, {
+				id: uuidv4(),
+				label: change.item?.label || '',
+				description: change.item?.description || '',
+				severity: change.item?.severity || 'minor'
+			}];
+		}
+
+		const total = aiSuggestions.checklist_changes.length;
+		aiSuggestions = null;
+		toast.success($i18n.t('Applied {{count}} suggestions', { count: total }));
 	};
 
 	const removeChecklistItem = (id: string) => {
@@ -524,10 +654,31 @@
 
 			<!-- Checklist -->
 			<div>
-				<label class="block text-sm font-medium mb-2">{$i18n.t('Checklist Criteria')}</label>
-				<p class="text-xs text-gray-500 mb-3">
-					{$i18n.t('Define specific items the AI should check for on each page.')}
-				</p>
+				<div class="flex items-center justify-between mb-2">
+					<div>
+						<label class="block text-sm font-medium">{$i18n.t('Checklist Criteria')}</label>
+						<p class="text-xs text-gray-500 mt-0.5">
+							{$i18n.t('Define specific items the AI should check for on each page.')}
+						</p>
+					</div>
+					<Tooltip content={meta.knowledge_base_ids.length === 0 ? $i18n.t('Attach knowledge bases first') : !model_id ? $i18n.t('Select a model first') : $i18n.t('Generate checklist items from knowledge bases')}>
+						<button
+							type="button"
+							class="px-3 py-1.5 text-sm bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700 rounded-xl transition flex items-center gap-1.5 disabled:opacity-40 disabled:cursor-not-allowed"
+							disabled={aiAssistLoading || meta.knowledge_base_ids.length === 0 || !model_id}
+							on:click={handleAiAssist}
+						>
+							{#if aiAssistLoading}
+								<Spinner className="size-3.5" />
+							{:else}
+								<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="size-4">
+									<path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904 9 18.75l-.813-2.846a4.5 4.5 0 0 0-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 0 0 3.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 0 0 3.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 0 0-3.09 3.09ZM18.259 8.715 18 9.75l-.259-1.035a3.375 3.375 0 0 0-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 0 0 2.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 0 0 2.455 2.456L21.75 6l-1.036.259a3.375 3.375 0 0 0-2.455 2.456ZM16.894 20.567 16.5 21.75l-.394-1.183a2.25 2.25 0 0 0-1.423-1.423L13.5 18.75l1.183-.394a2.25 2.25 0 0 0 1.423-1.423l.394-1.183.394 1.183a2.25 2.25 0 0 0 1.423 1.423l1.183.394-1.183.394a2.25 2.25 0 0 0-1.423 1.423Z" />
+								</svg>
+							{/if}
+							{$i18n.t('AI Assist')}
+						</button>
+					</Tooltip>
+				</div>
 
 				{#if meta.checklist.length > 0}
 					<div class="space-y-2 mb-3">
@@ -620,6 +771,96 @@
 								{/if}
 							</div>
 						{/each}
+					</div>
+				{/if}
+
+				<!-- AI Suggestions Panel -->
+				{#if aiSuggestions && aiSuggestions.checklist_changes && aiSuggestions.checklist_changes.length > 0}
+					<div class="mb-3 p-3 rounded-xl border-2 border-purple-300 dark:border-purple-700 bg-purple-50/50 dark:bg-purple-900/20">
+						<div class="flex items-center justify-between mb-2">
+							<div class="flex items-center gap-2">
+								<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="size-4 text-purple-600 dark:text-purple-400">
+									<path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904 9 18.75l-.813-2.846a4.5 4.5 0 0 0-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 0 0 3.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 0 0 3.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 0 0-3.09 3.09ZM18.259 8.715 18 9.75l-.259-1.035a3.375 3.375 0 0 0-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 0 0 2.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 0 0 2.455 2.456L21.75 6l-1.036.259a3.375 3.375 0 0 0-2.455 2.456ZM16.894 20.567 16.5 21.75l-.394-1.183a2.25 2.25 0 0 0-1.423-1.423L13.5 18.75l1.183-.394a2.25 2.25 0 0 0 1.423-1.423l.394-1.183.394 1.183a2.25 2.25 0 0 0 1.423 1.423l1.183.394-1.183.394a2.25 2.25 0 0 0-1.423 1.423Z" />
+								</svg>
+								<span class="text-sm font-medium text-purple-700 dark:text-purple-300">
+									{$i18n.t('AI Suggestions')} ({aiSuggestions.checklist_changes.length})
+								</span>
+							</div>
+							<div class="flex items-center gap-2">
+								<button
+									class="px-2 py-1 text-xs font-medium bg-purple-600 hover:bg-purple-700 text-white rounded-lg transition"
+									on:click={acceptAllSuggestions}
+								>
+									{$i18n.t('Accept All')}
+								</button>
+								<button
+									class="px-2 py-1 text-xs text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 transition"
+									on:click={() => { aiSuggestions = null; }}
+								>
+									{$i18n.t('Dismiss All')}
+								</button>
+							</div>
+						</div>
+						{#if aiSuggestions.summary}
+							<p class="text-xs text-gray-600 dark:text-gray-400 mb-2">{aiSuggestions.summary}</p>
+						{/if}
+						<div class="space-y-2">
+							{#each aiSuggestions.checklist_changes as change, index}
+								<div class="p-2 rounded-lg border border-purple-200 dark:border-purple-800 bg-white dark:bg-gray-900">
+									<div class="flex items-start gap-2">
+										<span class="shrink-0 text-xs font-medium px-1.5 py-0.5 rounded uppercase {change.action === 'add' ? 'bg-green-500/20 text-green-700 dark:text-green-300' : change.action === 'modify' ? 'bg-yellow-500/20 text-yellow-700 dark:text-yellow-300' : 'bg-red-500/20 text-red-700 dark:text-red-300'}">
+											{change.action}
+										</span>
+										<div class="flex-1 min-w-0">
+											{#if change.action === 'add'}
+												<div class="flex items-center gap-2">
+													<span class="text-xs font-medium px-1.5 py-0.5 rounded uppercase {change.item?.severity === 'critical' ? 'bg-red-500/20 text-red-700 dark:text-red-200' : change.item?.severity === 'major' ? 'bg-orange-500/20 text-orange-700 dark:text-orange-200' : change.item?.severity === 'minor' ? 'bg-yellow-500/20 text-yellow-700 dark:text-yellow-200' : 'bg-blue-500/20 text-blue-700 dark:text-blue-200'}">
+														{change.item?.severity || 'info'}
+													</span>
+													<span class="text-sm font-medium">{change.item?.label || ''}</span>
+												</div>
+												{#if change.item?.description}
+													<p class="text-xs text-gray-600 dark:text-gray-400 mt-1">{change.item.description}</p>
+												{/if}
+											{:else if change.action === 'modify'}
+												<span class="text-sm font-medium">{change.updates?.label || '(modify existing item)'}</span>
+												{#if change.updates?.description}
+													<p class="text-xs text-gray-600 dark:text-gray-400 mt-1">{change.updates.description}</p>
+												{/if}
+												{#if change.updates?.severity}
+													<span class="text-xs text-gray-500 mt-1">Severity: {change.updates.severity}</span>
+												{/if}
+											{:else if change.action === 'remove'}
+												<span class="text-sm font-medium line-through text-gray-500">{(() => { const item = meta.checklist.find((i) => i.id === change.item_id); return item?.label || change.item_id; })()}</span>
+											{/if}
+											{#if change.reason}
+												<p class="text-xs text-purple-600 dark:text-purple-400 mt-1 italic">{change.reason}</p>
+											{/if}
+										</div>
+										<div class="flex items-center gap-1 shrink-0">
+											<button
+												class="p-1 text-gray-400 hover:text-green-600 transition"
+												title={$i18n.t('Accept')}
+												on:click={() => acceptSuggestion(index)}
+											>
+												<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="size-4">
+													<path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5" />
+												</svg>
+											</button>
+											<button
+												class="p-1 text-gray-400 hover:text-red-600 transition"
+												title={$i18n.t('Dismiss')}
+												on:click={() => dismissSuggestion(index)}
+											>
+												<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="size-4">
+													<path stroke-linecap="round" stroke-linejoin="round" d="M6 18 18 6M6 6l12 12" />
+												</svg>
+											</button>
+										</div>
+									</div>
+								</div>
+							{/each}
+						</div>
 					</div>
 				{/if}
 
