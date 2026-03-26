@@ -39,6 +39,10 @@ Location coordinates are normalized (0-1) relative to the page dimensions:
 
 reference_text: The exact text label or identifier visible on the drawing near the issue (e.g., "MT-415AB", "Panel LP-2", "20A/1P"). Copy the characters exactly as they appear on the drawing. This is used to precisely locate the finding via text search. If there is no nearby text label, set to null.
 
+IMPORTANT: Only create findings for actual problems, errors, or concerns that may need attention.
+Do NOT create findings for items that appear correct or compliant — do not annotate something just to confirm it looks good.
+If a checklist item passes with no issues, simply omit it from the findings. A finding must always represent a problem or potential problem.
+
 If no issues are found, return an empty findings array with page_result "pass".
 Return ONLY valid JSON, no markdown code blocks or other text."""
 
@@ -565,7 +569,8 @@ Return your response as a JSON object:
 Guidelines:
 - Only report REAL inconsistencies with specific evidence from the data.
 - Do NOT flag items that appear on only one page unless they are broken cross-sheet references.
-- Severity guide: critical = safety/code issue (wrong breaker/wire size), major = significant mismatch, minor = minor discrepancy, info = potential issue worth noting.
+- Severity guide: critical = safety/code issue (wrong breaker/wire size), major = significant mismatch, minor = minor discrepancy, info = genuine ambiguity that warrants human review.
+- Do NOT create findings for items that are consistent and correct — only report actual problems or genuine ambiguities.
 - Include the exact document_id and page_number from the source data in references.
 - If no cross-reference issues are found, return an empty findings array.
 - Return ONLY valid JSON, no markdown code blocks or other text."""
@@ -791,11 +796,13 @@ You will receive:
 2. The current checklist criteria
 3. Confirmed findings — real issues the AI correctly identified
 4. Dismissed findings with reasons — false positives that should be avoided
+5. Missed issues — real issues a human reviewer found that the AI failed to detect
 
 Your task is to suggest changes to the system prompt and checklist that would:
 - Reduce false positives (based on dismissed findings and their reasons)
 - Reinforce patterns that correctly identified real issues
 - Add new checklist items if review feedback suggests gaps
+- Add detection patterns for issues the AI missed (based on missed issues with their descriptions)
 
 Return your response as a JSON object with this exact structure:
 {
@@ -837,6 +844,9 @@ async def generate_self_improve_suggestions(
     # Build context from findings
     confirmed = [f for f in findings if f.status == "confirmed"]
     dismissed = [f for f in findings if f.status == "dismissed"]
+    # Human findings are always included regardless of status —
+    # every manual annotation represents something the AI should have caught
+    missed = [f for f in findings if f.source == "human"]
 
     confirmed_text = ""
     if confirmed:
@@ -850,6 +860,14 @@ async def generate_self_improve_suggestions(
         for f in dismissed:
             reason = (f.meta or {}).get("dismissal_reason", "No reason given")
             dismissed_text += f"- [{f.severity.upper()}] {f.title}: {f.description or 'No description'}\n  Dismissal reason: {reason}\n"
+
+    missed_text = ""
+    if missed:
+        missed_text = "\n--- Missed Issues (Human-Added, AI Failed to Detect) ---\n"
+        for f in missed:
+            missed_text += f"- [{f.severity.upper()}] {f.title}: {f.description or 'No description'}\n"
+            if f.page_number:
+                missed_text += f"  Page: {f.page_number}\n"
 
     # Build checklist text
     template_meta = template.meta or {}
@@ -871,6 +889,7 @@ async def generate_self_improve_suggestions(
 {checklist_text}
 {confirmed_text}
 {dismissed_text}
+{missed_text}
 
 Based on this review feedback, suggest changes to improve the template's system prompt and checklist criteria."""
 
