@@ -87,6 +87,30 @@
 	let newChecklistLabel = '';
 	let newChecklistDescription = '';
 	let newChecklistSeverity = 'minor';
+	let editingItemId: string | null = null;
+	let editingOriginal: { label: string; description: string; severity: string } | null = null;
+
+	const startEditItem = (item: any) => {
+		editingOriginal = { label: item.label, description: item.description || '', severity: item.severity };
+		editingItemId = item.id;
+	};
+
+	const cancelEditItem = (item: any) => {
+		if (editingOriginal) {
+			item.label = editingOriginal.label;
+			item.description = editingOriginal.description;
+			item.severity = editingOriginal.severity;
+			meta.checklist = meta.checklist;
+		}
+		editingItemId = null;
+		editingOriginal = null;
+	};
+
+	const saveEditItem = () => {
+		editingItemId = null;
+		editingOriginal = null;
+		meta.checklist = meta.checklist;
+	};
 
 	const addChecklistItem = () => {
 		if (!newChecklistLabel.trim()) return;
@@ -435,75 +459,127 @@
 							<div
 								class="flex items-start gap-2 p-2 rounded-lg border border-gray-200 dark:border-gray-800"
 							>
-								<div class="flex-1 min-w-0">
-									<div class="flex items-center gap-2">
-										<span
-											class="text-xs font-medium px-1.5 py-0.5 rounded uppercase {item.severity ===
-											'critical'
-												? 'bg-red-500/20 text-red-700 dark:text-red-200'
-												: item.severity === 'major'
-													? 'bg-orange-500/20 text-orange-700 dark:text-orange-200'
-													: item.severity === 'minor'
-														? 'bg-yellow-500/20 text-yellow-700 dark:text-yellow-200'
-														: 'bg-blue-500/20 text-blue-700 dark:text-blue-200'}"
-										>
-											{item.severity}
-										</span>
-										<span class="text-sm font-medium truncate">{item.label}</span>
-									</div>
-									{#if item.description}
-										<p class="text-xs text-gray-500 mt-1">{item.description}</p>
-									{/if}
-								</div>
-								<button
-									class="p-1 text-gray-400 hover:text-red-600 transition shrink-0"
-									on:click={() => removeChecklistItem(item.id)}
-								>
-									<svg
-										xmlns="http://www.w3.org/2000/svg"
-										fill="none"
-										viewBox="0 0 24 24"
-										stroke-width="1.5"
-										stroke="currentColor"
-										class="size-4"
-									>
-										<path
-											stroke-linecap="round"
-											stroke-linejoin="round"
-											d="M6 18 18 6M6 6l12 12"
+								{#if editingItemId === item.id}
+									<!-- Edit mode -->
+									<div class="flex-1 min-w-0 space-y-2">
+										<input
+											type="text"
+											bind:value={item.label}
+											class="w-full text-sm rounded-lg border border-gray-200 dark:border-gray-800 bg-transparent px-2 py-1 outline-none font-medium"
 										/>
-									</svg>
-								</button>
+										<textarea
+											bind:value={item.description}
+											placeholder={$i18n.t('Description/note (optional)...')}
+											rows="2"
+											class="w-full text-xs rounded-lg border border-gray-200 dark:border-gray-800 bg-transparent px-2 py-1 outline-none"
+										></textarea>
+										<select
+											bind:value={item.severity}
+											class="text-xs rounded-lg border border-gray-200 dark:border-gray-800 bg-transparent px-2 py-1 outline-none"
+										>
+											<option value="critical">Critical</option>
+											<option value="major">Major</option>
+											<option value="minor">Minor</option>
+											<option value="info">Info</option>
+										</select>
+									</div>
+									<button
+										class="p-1 text-gray-400 hover:text-green-600 transition shrink-0"
+										title={$i18n.t('Save')}
+										on:click={saveEditItem}
+									>
+										<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="size-4">
+											<path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5" />
+										</svg>
+									</button>
+									<button
+										class="p-1 text-gray-400 hover:text-red-600 transition shrink-0"
+										title={$i18n.t('Cancel')}
+										on:click={() => cancelEditItem(item)}
+									>
+										<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="size-4">
+											<path stroke-linecap="round" stroke-linejoin="round" d="M6 18 18 6M6 6l12 12" />
+										</svg>
+									</button>
+								{:else}
+									<!-- Display mode -->
+									<div class="flex-1 min-w-0">
+										<div class="flex items-center gap-2">
+											<span
+												class="text-xs font-medium px-1.5 py-0.5 rounded uppercase {item.severity ===
+												'critical'
+													? 'bg-red-500/20 text-red-700 dark:text-red-200'
+													: item.severity === 'major'
+														? 'bg-orange-500/20 text-orange-700 dark:text-orange-200'
+														: item.severity === 'minor'
+															? 'bg-yellow-500/20 text-yellow-700 dark:text-yellow-200'
+															: 'bg-blue-500/20 text-blue-700 dark:text-blue-200'}"
+											>
+												{item.severity}
+											</span>
+											<span class="text-sm font-medium truncate">{item.label}</span>
+										</div>
+										{#if item.description}
+											<p class="text-xs text-gray-500 mt-1">{item.description}</p>
+										{/if}
+									</div>
+									<button
+										class="p-1 text-gray-400 hover:text-blue-600 transition shrink-0"
+										title={$i18n.t('Edit')}
+										on:click={() => startEditItem(item)}
+									>
+										<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="size-4">
+											<path stroke-linecap="round" stroke-linejoin="round" d="m16.862 4.487 1.687-1.688a1.875 1.875 0 1 1 2.652 2.652L10.582 16.07a4.5 4.5 0 0 1-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 0 1 1.13-1.897l8.932-8.931Zm0 0L19.5 7.125M18 14v4.75A2.25 2.25 0 0 1 15.75 21H5.25A2.25 2.25 0 0 1 3 18.75V8.25A2.25 2.25 0 0 1 5.25 6H10" />
+										</svg>
+									</button>
+									<button
+										class="p-1 text-gray-400 hover:text-red-600 transition shrink-0"
+										title={$i18n.t('Delete')}
+										on:click={() => removeChecklistItem(item.id)}
+									>
+										<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="size-4">
+											<path stroke-linecap="round" stroke-linejoin="round" d="M6 18 18 6M6 6l12 12" />
+										</svg>
+									</button>
+								{/if}
 							</div>
 						{/each}
 					</div>
 				{/if}
 
-				<div class="flex gap-2 items-end">
-					<div class="flex-1">
-						<input
-							type="text"
-							bind:value={newChecklistLabel}
-							placeholder={$i18n.t('Checklist item label...')}
-							class="w-full text-sm rounded-xl border border-gray-200 dark:border-gray-800 bg-transparent px-3 py-1.5 outline-none"
-							on:keydown={(e) => e.key === 'Enter' && addChecklistItem()}
-						/>
+				<div class="space-y-2">
+					<div class="flex gap-2 items-end">
+						<div class="flex-1">
+							<input
+								type="text"
+								bind:value={newChecklistLabel}
+								placeholder={$i18n.t('Checklist item label...')}
+								class="w-full text-sm rounded-xl border border-gray-200 dark:border-gray-800 bg-transparent px-3 py-1.5 outline-none"
+								on:keydown={(e) => e.key === 'Enter' && addChecklistItem()}
+							/>
+						</div>
+						<select
+							bind:value={newChecklistSeverity}
+							class="text-sm rounded-xl border border-gray-200 dark:border-gray-800 bg-transparent px-2 py-1.5 outline-none"
+						>
+							<option value="critical">Critical</option>
+							<option value="major">Major</option>
+							<option value="minor">Minor</option>
+							<option value="info">Info</option>
+						</select>
+						<button
+							class="px-3 py-1.5 text-sm bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700 rounded-xl transition"
+							on:click={addChecklistItem}
+						>
+							{$i18n.t('Add')}
+						</button>
 					</div>
-					<select
-						bind:value={newChecklistSeverity}
-						class="text-sm rounded-xl border border-gray-200 dark:border-gray-800 bg-transparent px-2 py-1.5 outline-none"
-					>
-						<option value="critical">Critical</option>
-						<option value="major">Major</option>
-						<option value="minor">Minor</option>
-						<option value="info">Info</option>
-					</select>
-					<button
-						class="px-3 py-1.5 text-sm bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700 rounded-xl transition"
-						on:click={addChecklistItem}
-					>
-						{$i18n.t('Add')}
-					</button>
+					<textarea
+						bind:value={newChecklistDescription}
+						placeholder={$i18n.t('Description/note (optional)...')}
+						rows="2"
+						class="w-full text-sm rounded-xl border border-gray-200 dark:border-gray-800 bg-transparent px-3 py-1.5 outline-none"
+					></textarea>
 				</div>
 			</div>
 
