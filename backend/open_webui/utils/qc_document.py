@@ -212,46 +212,54 @@ def render_annotated_page(
         if not loc:
             continue
 
+        # Normalize location to list of rects (handles both single dict and array)
+        if isinstance(loc, list):
+            rects = loc
+        else:
+            rects = [loc]
+
         number = finding.get("finding_number", 0)
         severity = finding.get("severity", "info")
         color = SEVERITY_COLORS.get(severity, SEVERITY_COLORS["info"])
 
-        x = loc.get("x", 0) * img_w
-        y = loc.get("y", 0) * img_h
-        w = loc.get("width", 0.05) * img_w
-        h = loc.get("height", 0.05) * img_h
+        for idx, rect in enumerate(rects):
+            x = rect.get("x", 0) * img_w
+            y = rect.get("y", 0) * img_h
+            w = rect.get("width", 0.05) * img_w
+            h = rect.get("height", 0.05) * img_h
 
-        # Draw semi-transparent rectangle
-        rect_color = color + (60,)  # alpha=60
-        draw.rectangle([x, y, x + w, y + h], fill=rect_color, outline=color + (200,), width=2)
+            # Draw semi-transparent rectangle
+            rect_color = color + (60,)  # alpha=60
+            draw.rectangle([x, y, x + w, y + h], fill=rect_color, outline=color + (200,), width=2)
 
-        # Draw numbered circle at top-left of rectangle
-        label = str(number)
-        circle_r = max(12, font_size)
-        cx = x - circle_r * 0.3
-        cy = y - circle_r * 0.3
-        # Clamp to image bounds
-        cx = max(circle_r, min(img_w - circle_r, cx))
-        cy = max(circle_r, min(img_h - circle_r, cy))
+            # Draw numbered circle only at the first rect
+            if idx == 0:
+                label = str(number)
+                circle_r = max(12, font_size)
+                cx = x - circle_r * 0.3
+                cy = y - circle_r * 0.3
+                # Clamp to image bounds
+                cx = max(circle_r, min(img_w - circle_r, cx))
+                cy = max(circle_r, min(img_h - circle_r, cy))
 
-        # White circle background with colored border
-        draw.ellipse(
-            [cx - circle_r, cy - circle_r, cx + circle_r, cy + circle_r],
-            fill=(255, 255, 255, 230),
-            outline=color + (255,),
-            width=2,
-        )
+                # White circle background with colored border
+                draw.ellipse(
+                    [cx - circle_r, cy - circle_r, cx + circle_r, cy + circle_r],
+                    fill=(255, 255, 255, 230),
+                    outline=color + (255,),
+                    width=2,
+                )
 
-        # Number text centered in circle
-        bbox = draw.textbbox((0, 0), label, font=font)
-        tw = bbox[2] - bbox[0]
-        th = bbox[3] - bbox[1]
-        draw.text(
-            (cx - tw / 2, cy - th / 2),
-            label,
-            fill=color + (255,),
-            font=font,
-        )
+                # Number text centered in circle
+                bbox = draw.textbbox((0, 0), label, font=font)
+                tw = bbox[2] - bbox[0]
+                th = bbox[3] - bbox[1]
+                draw.text(
+                    (cx - tw / 2, cy - th / 2),
+                    label,
+                    fill=color + (255,),
+                    font=font,
+                )
 
     # Composite overlay onto image
     result = Image.alpha_composite(img, overlay).convert("RGB")
