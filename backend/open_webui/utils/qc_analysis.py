@@ -5,6 +5,8 @@ import time
 import uuid
 from typing import Any, Optional
 
+from starlette.responses import JSONResponse
+
 from open_webui.utils.qc_document import (
     convert_pdf_to_pages,
     render_annotated_page,
@@ -170,8 +172,10 @@ async def analyze_page(
             bypass_filter=True,
         )
 
-        # Handle response - could be a dict or a StreamingResponse
-        if hasattr(response, "body"):
+        # Handle response - could be a dict, StreamingResponse, or JSONResponse
+        if isinstance(response, JSONResponse):
+            response_data = json.loads(response.body.decode("utf-8", "replace"))
+        elif hasattr(response, "body_iterator"):
             body = b""
             async for chunk in response.body_iterator:
                 if isinstance(chunk, bytes):
@@ -410,7 +414,9 @@ async def extract_page_structured_data(
             request, form_data, user=user, bypass_filter=True
         )
 
-        if hasattr(response, "body"):
+        if isinstance(response, JSONResponse):
+            response_data = json.loads(response.body.decode("utf-8", "replace"))
+        elif hasattr(response, "body_iterator"):
             body = b""
             async for chunk in response.body_iterator:
                 if isinstance(chunk, bytes):
@@ -738,7 +744,9 @@ async def run_cross_reference_analysis(
                 request, form_data, user=user, bypass_filter=True
             )
 
-            if hasattr(response, "body"):
+            if isinstance(response, JSONResponse):
+                response_data = json.loads(response.body.decode("utf-8", "replace"))
+            elif hasattr(response, "body_iterator"):
                 body = b""
                 async for chunk_data in response.body_iterator:
                     if isinstance(chunk_data, bytes):
@@ -916,7 +924,9 @@ Based on the knowledge base content above, provide checklist items for QC docume
             bypass_filter=True,
         )
 
-        if hasattr(response, "body"):
+        if isinstance(response, JSONResponse):
+            response_data = json.loads(response.body.decode("utf-8", "replace"))
+        elif hasattr(response, "body_iterator"):
             body = b""
             async for chunk in response.body_iterator:
                 if isinstance(chunk, bytes):
@@ -928,6 +938,20 @@ Based on the knowledge base content above, provide checklist items for QC docume
             response_data = response
         else:
             response_data = json.loads(response)
+
+        # Check if this is an error response
+        if "error" in response_data or "detail" in response_data:
+            error_msg = response_data.get("error", {})
+            if isinstance(error_msg, dict):
+                error_msg = error_msg.get("message", str(error_msg))
+            elif not error_msg:
+                error_msg = response_data.get("detail", "Unknown error")
+            log.error(f"Checklist assist: LLM returned error: {error_msg}")
+            return {
+                "summary": f"AI model error: {error_msg}",
+                "checklist_changes": [],
+                "error": True,
+            }
 
         content = ""
         if "choices" in response_data and response_data["choices"]:
@@ -951,10 +975,23 @@ def _parse_checklist_assist_response(content: str) -> dict:
     """Parse the checklist assist LLM response into structured suggestions."""
     content = content.strip()
 
+    if not content:
+        log.warning("Checklist assist: LLM returned empty content")
+        return {
+            "summary": "AI returned an empty response. The model may be unavailable or overloaded.",
+            "checklist_changes": [],
+            "error": True,
+        }
+
     if content.startswith("```"):
         lines = content.split("\n")
         lines = [l for l in lines if not l.strip().startswith("```")]
         content = "\n".join(lines)
+
+    # Try to extract JSON from the response even if there's surrounding text
+    json_match = re.search(r"\{[\s\S]*\}", content)
+    if json_match:
+        content = json_match.group(0)
 
     try:
         result = json.loads(content)
@@ -963,7 +1000,9 @@ def _parse_checklist_assist_response(content: str) -> dict:
         if "checklist_changes" not in result:
             result["checklist_changes"] = []
         return result
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as e:
+        log.warning(f"Checklist assist: Failed to parse LLM JSON: {e}")
+        log.warning(f"Checklist assist: Raw content (first 500 chars): {content[:500]}")
         return {
             "summary": "Could not parse AI response as structured suggestions.",
             "checklist_changes": [],
@@ -1098,7 +1137,9 @@ Based on this review feedback, suggest changes to improve the template's system 
         )
 
         # Handle response
-        if hasattr(response, "body"):
+        if isinstance(response, JSONResponse):
+            response_data = json.loads(response.body.decode("utf-8", "replace"))
+        elif hasattr(response, "body_iterator"):
             body = b""
             async for chunk in response.body_iterator:
                 if isinstance(chunk, bytes):
