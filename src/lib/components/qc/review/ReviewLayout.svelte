@@ -240,6 +240,8 @@
 						{$i18n.t('Extracting page data...')}
 					{:else if job.meta?.progress?.phase === 'cross_reference_correlation'}
 						{$i18n.t('Cross-referencing pages...')}
+					{:else if job.meta?.progress?.phase === 'per_page_analysis'}
+						{$i18n.t('Analyzing pages...')}
 					{:else}
 						{$i18n.t('Analyzing...')}
 					{/if}

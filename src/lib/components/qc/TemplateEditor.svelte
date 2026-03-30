@@ -30,6 +30,7 @@
 		supported_file_types: ['pdf', 'png', 'jpg'],
 		cross_reference_analysis: {
 			enabled: false,
+			cross_ref_first: false,
 			categories: []
 		}
 	};
@@ -906,7 +907,9 @@
 					<div>
 						<label class="block text-sm font-medium">{$i18n.t('Cross-Reference Analysis')}</label>
 						<p class="text-xs text-gray-500 mt-0.5">
-							{$i18n.t('Checks consistency across all pages after per-page analysis completes.')}
+							{meta.cross_reference_analysis.cross_ref_first
+								? $i18n.t('Cross-reference discrepancies are found first and fed into per-page analysis.')
+								: $i18n.t('Checks consistency across all pages after per-page analysis completes.')}
 						</p>
 					</div>
 					<button
@@ -924,6 +927,27 @@
 
 				{#if meta.cross_reference_analysis.enabled}
 					<div class="mt-3 p-3 rounded-xl border border-gray-200 dark:border-gray-800 space-y-3">
+						<!-- Run before per-page analysis toggle -->
+						<div class="flex items-center justify-between">
+							<div>
+								<p class="text-xs font-medium">{$i18n.t('Run before per-page analysis')}</p>
+								<p class="text-xs text-gray-500 mt-0.5">
+									{$i18n.t('Cross-reference discrepancies will be included as context during per-page analysis')}
+								</p>
+							</div>
+							<button
+								type="button"
+								class="relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out {meta.cross_reference_analysis.cross_ref_first ? 'bg-black dark:bg-white' : 'bg-gray-200 dark:bg-gray-700'}"
+								role="switch"
+								aria-checked={meta.cross_reference_analysis.cross_ref_first}
+								on:click={() => { meta.cross_reference_analysis.cross_ref_first = !meta.cross_reference_analysis.cross_ref_first; meta = meta; }}
+							>
+								<span
+									class="pointer-events-none inline-block h-4 w-4 transform rounded-full shadow ring-0 transition duration-200 ease-in-out {meta.cross_reference_analysis.cross_ref_first ? 'translate-x-4 bg-white dark:bg-black' : 'translate-x-0 bg-white dark:bg-gray-400'}"
+								/>
+							</button>
+						</div>
+
 						<p class="text-xs font-medium text-gray-600 dark:text-gray-400">
 							{$i18n.t('Analysis categories:')}
 						</p>

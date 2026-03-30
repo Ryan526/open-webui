@@ -132,6 +132,7 @@ async def analyze_page(
     page_image_b64: str,
     page_number: int,
     user: Any,
+    cross_ref_context: Optional[str] = None,
 ) -> dict:
     """
     Send a page image to the vision model for QC analysis.
@@ -152,7 +153,10 @@ async def analyze_page(
                     },
                     {
                         "type": "text",
-                        "text": f"Analyze page {page_number} of this document for quality control issues. Return your findings as JSON.",
+                        "text": (
+                            f"Analyze page {page_number} of this document for quality control issues. Return your findings as JSON."
+                            + (f"\n\n--- Cross-Reference Context for This Page ---\n{cross_ref_context}\n\nThe above cross-reference discrepancies were found during a prior cross-sheet analysis. Confirm, refine, or incorporate them as appropriate — do not simply duplicate them verbatim." if cross_ref_context else "")
+                        ),
                     },
                 ],
             },
@@ -805,6 +809,66 @@ def _parse_cross_reference_response(content: str) -> list[dict]:
         return []
 
 
+def format_cross_ref_context_for_page(
+    xref_findings: list[dict],
+    document_id: str,
+    page_number: int,
+) -> Optional[str]:
+    """
+    Filter cross-reference findings to those relevant to a specific page
+    and format them as concise context text for per-page analysis.
+
+    Returns None if no findings match this page.
+    """
+    SEVERITY_ORDER = {"critical": 0, "major": 1, "minor": 2, "info": 3}
+    MAX_CHARS = 4000
+
+    matching = []
+    for finding in xref_findings:
+        refs = finding.get("references", [])
+        if any(
+            r.get("document_id") == document_id and r.get("page_number") == page_number
+            for r in refs
+        ):
+            matching.append(finding)
+
+    if not matching:
+        return None
+
+    # Sort by severity (critical first)
+    matching.sort(key=lambda f: SEVERITY_ORDER.get(f.get("severity", "info"), 3))
+
+    lines = []
+    total_len = 0
+    for finding in matching:
+        severity = finding.get("severity", "major").upper()
+        title = finding.get("title", "Untitled")
+        desc = finding.get("description", "")
+        refs = finding.get("references", [])
+
+        # Show other pages involved
+        other_pages = []
+        for r in refs:
+            if r.get("document_id") != document_id or r.get("page_number") != page_number:
+                ctx = r.get("context", "")
+                other_pages.append(
+                    f"  - Page {r.get('page_number', '?')}: {ctx}" if ctx
+                    else f"  - Page {r.get('page_number', '?')}"
+                )
+
+        entry = f"[{severity}] {title}\n{desc}"
+        if other_pages:
+            entry += "\nOther pages involved:\n" + "\n".join(other_pages)
+
+        if total_len + len(entry) > MAX_CHARS:
+            lines.append("[Additional cross-reference findings truncated]")
+            break
+        lines.append(entry)
+        total_len += len(entry)
+
+    return "\n\n".join(lines)
+
+
 CHECKLIST_ASSIST_SYSTEM_PROMPT = """You are a QC checklist generation assistant. You analyze knowledge base content (standards documents, specifications, codes) and produce checklist items for quality control reviews.
 
 You will receive:
@@ -1202,6 +1266,154 @@ def _parse_self_improve_response(content: str) -> dict:
         }
 
 
+async def _run_cross_reference_pass(
+    request: Any,
+    job_id: str,
+    job: Any,
+    documents: list,
+    doc_pdf_paths: dict,
+    model_id: str,
+    system_prompt: str,
+    categories: list[dict],
+    user: Any,
+    total_pages: int,
+) -> tuple[list[dict], int]:
+    """
+    Run cross-ref extraction + correlation.
+    Returns (xref_findings_list, cross_ref_findings_count).
+    Also inserts findings into DB.
+    """
+    from open_webui.models.qc import QCJobs, QCJobDocuments, QCFindings
+    from open_webui.models.files import Files
+    from open_webui.storage.provider import Storage
+
+    # Update progress
+    progress_meta = {**(job.meta or {}), "progress": {
+        "phase": "cross_reference_extraction",
+        "detail": "Extracting structured data from pages...",
+    }}
+    QCJobs.update_job_status(job_id, "running", meta=progress_meta)
+
+    # Step A: Extract structured data from each page
+    documents_data = []
+    for doc in documents:
+        doc_meta = doc.meta or {}
+        page_images = doc_meta.get("page_images", {})
+        if not page_images:
+            continue
+
+        pdf_path = doc_pdf_paths.get(doc.id)
+        page_extractions = {}
+
+        for page_str, clean_file_id in page_images.items():
+            page_num = int(page_str)
+
+            # Get page image for vision extraction (if needed)
+            page_image_b64 = None
+            try:
+                file_record = Files.get_file_by_id(clean_file_id)
+                if file_record:
+                    fp = Storage.get_file(file_record.path)
+                    with open(fp, "rb") as f:
+                        page_image_b64 = image_to_base64(f.read())
+            except Exception as e:
+                log.debug(f"Could not load page image for extraction: {e}")
+
+            try:
+                extracted = await extract_page_structured_data(
+                    request, model_id, pdf_path, page_num,
+                    page_image_b64, user, categories=categories,
+                )
+                page_extractions[str(page_num)] = extracted
+            except Exception as e:
+                log.warning(f"Extraction failed for doc {doc.id} page {page_num}: {e}")
+
+        # Store extracted data in document meta
+        if page_extractions:
+            updated_meta = {**(doc.meta or {}), "extracted_data": page_extractions}
+            QCJobDocuments.update_document(doc.id, meta=updated_meta)
+
+        # Get document name for the index
+        doc_name = "Unknown"
+        try:
+            file_record = Files.get_file_by_id(doc.file_id)
+            if file_record:
+                doc_name = (file_record.meta or {}).get("name", file_record.filename)
+        except Exception:
+            pass
+
+        documents_data.append({
+            "document_id": doc.id,
+            "document_name": doc_name,
+            "pages": page_extractions,
+        })
+
+    # Step B: Build index and run correlation
+    xref_findings = []
+    cross_ref_findings_count = 0
+
+    if documents_data:
+        progress_meta = {**(job.meta or {}), "progress": {
+            "phase": "cross_reference_correlation",
+            "detail": f"Cross-referencing data across {total_pages} pages...",
+        }}
+        QCJobs.update_job_status(job_id, "running", meta=progress_meta)
+
+        xref_index = build_cross_reference_index(documents_data, categories=categories)
+
+        xref_findings = await run_cross_reference_analysis(
+            request, model_id, xref_index, user,
+            custom_instructions=system_prompt if system_prompt != QC_SYSTEM_PROMPT else None,
+            categories=categories,
+        )
+
+        # Insert cross-reference findings
+        for xref_finding in xref_findings:
+            refs = xref_finding.get("references", [])
+            # Use first reference as the primary location
+            primary_doc_id = refs[0]["document_id"] if refs else None
+            primary_page = refs[0]["page_number"] if refs else None
+            primary_ref_text = refs[0].get("reference_text") if refs else None
+
+            finding_number = QCFindings.get_next_finding_number(job_id)
+            finding_data = {
+                "id": str(uuid.uuid4()),
+                "job_id": job_id,
+                "document_id": primary_doc_id,
+                "user_id": user.id,
+                "source": "cross_reference",
+                "finding_number": finding_number,
+                "page_number": primary_page,
+                "checklist_item_id": None,
+                "severity": xref_finding.get("severity", "major"),
+                "status": "open",
+                "title": xref_finding.get("title", "Cross-Reference Issue"),
+                "description": xref_finding.get("description", ""),
+                "location": None,
+                "ai_response": {
+                    "reasoning": xref_finding.get("reasoning", ""),
+                },
+                "meta": {
+                    "source": "cross_reference",
+                    "cross_ref_type": xref_finding.get("cross_ref_type", ""),
+                    "references": refs,
+                    "reference_text": primary_ref_text,
+                    "location_source": "cross_reference",
+                },
+                "created_at": int(time.time()),
+                "updated_at": int(time.time()),
+            }
+            QCFindings.insert_finding_raw(finding_data)
+            cross_ref_findings_count += 1
+
+        log.info(
+            f"Cross-reference analysis complete for job {job_id}: "
+            f"{cross_ref_findings_count} findings"
+        )
+
+    return xref_findings, cross_ref_findings_count
+
+
 async def run_qc_job(
     request: Any,
     job_id: str,
@@ -1264,12 +1476,50 @@ async def run_qc_job(
         except Exception as e:
             log.debug(f"Could not resolve PDF path for doc {doc.id}: {e}")
 
+    # Read cross-reference config early (needed for ordering decision)
+    cross_ref_config = meta.get("cross_reference_analysis", {})
+    cross_ref_enabled = cross_ref_config.get("enabled", False)
+    cross_ref_first = cross_ref_config.get("cross_ref_first", False) and cross_ref_enabled
+    raw_categories = cross_ref_config.get("categories", [])
+    categories = _migrate_legacy_categories(raw_categories)
+
     total_pages = 0
     total_findings = 0
+    cross_ref_findings_count = 0
     all_failed = True
     any_failed = False
 
+    # Count total pages up front (needed for cross-ref progress messages)
+    for doc in documents:
+        doc_meta = doc.meta or {}
+        total_pages += len(doc_meta.get("page_images", {}))
+
     try:
+        # ─── Cross-ref first mode: run extraction + correlation before per-page ───
+        xref_findings_list: list[dict] = []
+        if cross_ref_first:
+            log.info(f"Running cross-reference FIRST for job {job_id}")
+            try:
+                xref_findings_list, cross_ref_findings_count = await _run_cross_reference_pass(
+                    request, job_id, job, documents, doc_pdf_paths,
+                    model_id, system_prompt, categories, user, total_pages,
+                )
+                total_findings += cross_ref_findings_count
+            except Exception as e:
+                log.error(f"Cross-ref first pass failed for job {job_id}, continuing with per-page: {e}")
+
+        # ─── Per-page analysis ───
+        if cross_ref_first:
+            # Update progress phase for per-page analysis
+            progress_meta = {**(job.meta or {}), "progress": {
+                "phase": "per_page_analysis",
+                "detail": "Analyzing pages...",
+            }}
+            QCJobs.update_job_status(job_id, "running", meta=progress_meta)
+
+        # Reset page count (we'll re-count during actual analysis)
+        total_pages = 0
+
         for doc in documents:
             try:
                 QCJobDocuments.update_document(doc.id, status="processing")
@@ -1303,6 +1553,13 @@ async def run_qc_job(
 
                     page_image_b64 = image_to_base64(page_image_bytes)
 
+                    # Build cross-ref context for this page (if cross-ref ran first)
+                    cross_ref_context = None
+                    if cross_ref_first and xref_findings_list:
+                        cross_ref_context = format_cross_ref_context_for_page(
+                            xref_findings_list, doc.id, page_num,
+                        )
+
                     # Run AI analysis
                     result = await analyze_page(
                         request,
@@ -1311,6 +1568,7 @@ async def run_qc_job(
                         page_image_b64,
                         page_num,
                         user,
+                        cross_ref_context=cross_ref_context,
                     )
 
                     # Get next finding number
@@ -1441,137 +1699,14 @@ async def run_qc_job(
                 QCJobDocuments.update_document(doc.id, status="failed")
                 any_failed = True
 
-        # ─── Pass 2: Cross-Reference Analysis ───
-        cross_ref_config = meta.get("cross_reference_analysis", {})
-        cross_ref_enabled = cross_ref_config.get("enabled", False)
-        raw_categories = cross_ref_config.get("categories", [])
-        categories = _migrate_legacy_categories(raw_categories)
-        cross_ref_findings_count = 0
-
-        if cross_ref_enabled and not all_failed:
+        # ─── Cross-reference after per-page (default mode) ───
+        if cross_ref_enabled and not cross_ref_first and not all_failed:
             log.info(f"Starting cross-reference analysis for job {job_id}")
-
-            # Update progress
-            progress_meta = {**(job.meta or {}), "progress": {
-                "phase": "cross_reference_extraction",
-                "detail": "Extracting structured data from pages...",
-            }}
-            QCJobs.update_job_status(job_id, "running", meta=progress_meta)
-
-            # Step A: Extract structured data from each page
-            documents_data = []
-            for doc in documents:
-                doc_meta = doc.meta or {}
-                page_images = doc_meta.get("page_images", {})
-                if not page_images:
-                    continue
-
-                pdf_path = doc_pdf_paths.get(doc.id)
-                page_extractions = {}
-
-                for page_str, clean_file_id in page_images.items():
-                    page_num = int(page_str)
-
-                    # Get page image for vision extraction (if needed)
-                    page_image_b64 = None
-                    try:
-                        file_record = Files.get_file_by_id(clean_file_id)
-                        if file_record:
-                            fp = Storage.get_file(file_record.path)
-                            with open(fp, "rb") as f:
-                                page_image_b64 = image_to_base64(f.read())
-                    except Exception as e:
-                        log.debug(f"Could not load page image for extraction: {e}")
-
-                    try:
-                        extracted = await extract_page_structured_data(
-                            request, model_id, pdf_path, page_num,
-                            page_image_b64, user, categories=categories,
-                        )
-                        page_extractions[str(page_num)] = extracted
-                    except Exception as e:
-                        log.warning(f"Extraction failed for doc {doc.id} page {page_num}: {e}")
-
-                # Store extracted data in document meta
-                if page_extractions:
-                    updated_meta = {**(doc.meta or {}), "extracted_data": page_extractions}
-                    QCJobDocuments.update_document(doc.id, meta=updated_meta)
-
-                # Get document name for the index
-                doc_name = "Unknown"
-                try:
-                    file_record = Files.get_file_by_id(doc.file_id)
-                    if file_record:
-                        doc_name = (file_record.meta or {}).get("name", file_record.filename)
-                except Exception:
-                    pass
-
-                documents_data.append({
-                    "document_id": doc.id,
-                    "document_name": doc_name,
-                    "pages": page_extractions,
-                })
-
-            # Step B: Build index and run correlation
-            if documents_data:
-                progress_meta = {**(job.meta or {}), "progress": {
-                    "phase": "cross_reference_correlation",
-                    "detail": f"Cross-referencing data across {total_pages} pages...",
-                }}
-                QCJobs.update_job_status(job_id, "running", meta=progress_meta)
-
-                xref_index = build_cross_reference_index(documents_data, categories=categories)
-
-                xref_findings = await run_cross_reference_analysis(
-                    request, model_id, xref_index, user,
-                    custom_instructions=system_prompt if system_prompt != QC_SYSTEM_PROMPT else None,
-                    categories=categories,
-                )
-
-                # Insert cross-reference findings
-                for xref_finding in xref_findings:
-                    refs = xref_finding.get("references", [])
-                    # Use first reference as the primary location
-                    primary_doc_id = refs[0]["document_id"] if refs else None
-                    primary_page = refs[0]["page_number"] if refs else None
-                    primary_ref_text = refs[0].get("reference_text") if refs else None
-
-                    finding_number = QCFindings.get_next_finding_number(job_id)
-                    finding_data = {
-                        "id": str(uuid.uuid4()),
-                        "job_id": job_id,
-                        "document_id": primary_doc_id,
-                        "user_id": user.id,
-                        "source": "cross_reference",
-                        "finding_number": finding_number,
-                        "page_number": primary_page,
-                        "checklist_item_id": None,
-                        "severity": xref_finding.get("severity", "major"),
-                        "status": "open",
-                        "title": xref_finding.get("title", "Cross-Reference Issue"),
-                        "description": xref_finding.get("description", ""),
-                        "location": None,
-                        "ai_response": {
-                            "reasoning": xref_finding.get("reasoning", ""),
-                        },
-                        "meta": {
-                            "source": "cross_reference",
-                            "cross_ref_type": xref_finding.get("cross_ref_type", ""),
-                            "references": refs,
-                            "reference_text": primary_ref_text,
-                            "location_source": "cross_reference",
-                        },
-                        "created_at": int(time.time()),
-                        "updated_at": int(time.time()),
-                    }
-                    QCFindings.insert_finding_raw(finding_data)
-                    total_findings += 1
-                    cross_ref_findings_count += 1
-
-                log.info(
-                    f"Cross-reference analysis complete for job {job_id}: "
-                    f"{cross_ref_findings_count} findings"
-                )
+            xref_findings_list, cross_ref_findings_count = await _run_cross_reference_pass(
+                request, job_id, job, documents, doc_pdf_paths,
+                model_id, system_prompt, categories, user, total_pages,
+            )
+            total_findings += cross_ref_findings_count
 
         # Determine overall result
         findings = QCFindings.get_findings_by_job_id(job_id)
