@@ -1439,6 +1439,16 @@ USER_PERMISSIONS_FEATURES_QC = (
     os.environ.get("USER_PERMISSIONS_FEATURES_QC", "True").lower() == "true"
 )
 
+try:
+    QC_MAX_UPLOAD_BYTES = int(os.environ.get("QC_MAX_UPLOAD_BYTES", 100 * 1024 * 1024))
+except ValueError:
+    QC_MAX_UPLOAD_BYTES = 100 * 1024 * 1024
+
+try:
+    QC_MAX_PDF_PAGES = int(os.environ.get("QC_MAX_PDF_PAGES", 200))
+except ValueError:
+    QC_MAX_PDF_PAGES = 200
+
 
 USER_PERMISSIONS_SETTINGS_INTERFACE = os.environ.get('USER_PERMISSIONS_SETTINGS_INTERFACE', 'True').lower() == 'true'
 

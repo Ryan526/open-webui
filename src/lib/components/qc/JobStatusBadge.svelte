@@ -6,6 +6,7 @@
 		pending: 'bg-gray-500/20 text-gray-700 dark:text-gray-200',
 		running: 'bg-blue-500/20 text-blue-700 dark:text-blue-200',
 		completed: 'bg-green-500/20 text-green-700 dark:text-green-200',
+		partial: 'bg-yellow-500/20 text-yellow-700 dark:text-yellow-200',
 		failed: 'bg-red-500/20 text-red-700 dark:text-red-200'
 	};
 
@@ -16,11 +17,16 @@
 	};
 
 	$: displayClass =
-		status === 'completed' && result
+		(status === 'completed' || status === 'partial') && result
 			? resultClasses[result] ?? statusClasses[status]
 			: statusClasses[status] ?? statusClasses['pending'];
 
-	$: displayText = status === 'completed' && result ? result : status;
+	$: displayText =
+		status === 'partial'
+			? 'partial' + (result ? ` · ${result}` : '')
+			: status === 'completed' && result
+				? result
+				: status;
 </script>
 
 <span class="text-xs font-medium {displayClass} px-1.5 py-0.5 rounded-md uppercase">

@@ -18,7 +18,21 @@
 	let selectedTemplateId = '';
 	let selectedModelId = '';
 	let files: FileList | null = null;
-	let uploadedFiles: { name: string; type: string }[] = [];
+	let uploadedFiles: { name: string; type: string; size: number }[] = [];
+
+	const formatBytes = (bytes: number): string => {
+		if (!bytes) return '0 B';
+		const units = ['B', 'KB', 'MB', 'GB'];
+		let i = 0;
+		let n = bytes;
+		while (n >= 1024 && i < units.length - 1) {
+			n /= 1024;
+			i++;
+		}
+		return `${n.toFixed(n >= 10 || i === 0 ? 0 : 1)} ${units[i]}`;
+	};
+
+	$: totalUploadBytes = uploadedFiles.reduce((acc, f) => acc + f.size, 0);
 
 	let fileInput: HTMLInputElement;
 
@@ -73,7 +87,11 @@
 
 	const handleFileSelect = () => {
 		if (files) {
-			uploadedFiles = Array.from(files).map((f) => ({ name: f.name, type: f.type }));
+			uploadedFiles = Array.from(files).map((f) => ({
+				name: f.name,
+				type: f.type,
+				size: f.size
+			}));
 		}
 	};
 
@@ -172,7 +190,12 @@
 				<div
 					class="border-2 border-dashed border-gray-300 dark:border-gray-700 rounded-xl p-6 text-center cursor-pointer hover:border-gray-400 dark:hover:border-gray-600 transition"
 					on:click={() => fileInput?.click()}
-					on:keydown={(e) => e.key === 'Enter' && fileInput?.click()}
+					on:keydown={(e) => {
+						if (e.key === 'Enter' || e.key === ' ') {
+							e.preventDefault();
+							fileInput?.click();
+						}
+					}}
 					role="button"
 					tabindex="0"
 				>
@@ -189,8 +212,17 @@
 					{#if uploadedFiles.length > 0}
 						<div class="space-y-1">
 							{#each uploadedFiles as file}
-								<div class="text-sm text-gray-700 dark:text-gray-300">{file.name}</div>
+								<div class="text-sm text-gray-700 dark:text-gray-300 flex justify-between gap-2">
+									<span class="truncate">{file.name}</span>
+									<span class="text-xs text-gray-500 shrink-0">{formatBytes(file.size)}</span>
+								</div>
 							{/each}
+							<div class="text-xs text-gray-500 pt-1 border-t border-gray-200 dark:border-gray-800">
+								{$i18n.t('{{count}} file(s), {{size}} total', {
+									count: uploadedFiles.length,
+									size: formatBytes(totalUploadBytes)
+								})}
+							</div>
 						</div>
 					{:else}
 						<div class="text-gray-400">

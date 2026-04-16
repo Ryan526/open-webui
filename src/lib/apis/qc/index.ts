@@ -1,5 +1,15 @@
 import { WEBUI_API_BASE_URL } from '$lib/constants';
 
+const extractError = (err: unknown): string => {
+	if (typeof err === 'string') return err;
+	if (err && typeof err === 'object') {
+		const anyErr = err as { detail?: unknown; message?: unknown };
+		if (typeof anyErr.detail === 'string') return anyErr.detail;
+		if (typeof anyErr.message === 'string') return anyErr.message;
+	}
+	return 'Request failed';
+};
+
 // =====================
 // Templates
 // =====================
@@ -19,7 +29,7 @@ export const getQCTemplates = async (token: string) => {
 			return res.json();
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = extractError(err);
 			console.error(err);
 			return null;
 		});
@@ -47,7 +57,7 @@ export const getQCSystemPrompts = async (token: string, categories?: object[]) =
 			return res.json();
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = extractError(err);
 			console.error(err);
 			return null;
 		});
@@ -70,7 +80,7 @@ export const getQCTemplateById = async (token: string, id: string) => {
 			return res.json();
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = extractError(err);
 			console.error(err);
 			return null;
 		});
@@ -104,7 +114,7 @@ export const createQCTemplate = async (
 			return res.json();
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = extractError(err);
 			console.error(err);
 			return null;
 		});
@@ -139,7 +149,7 @@ export const updateQCTemplate = async (
 			return res.json();
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = extractError(err);
 			console.error(err);
 			return null;
 		});
@@ -162,7 +172,7 @@ export const deleteQCTemplate = async (token: string, id: string) => {
 			return res.json();
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = extractError(err);
 			console.error(err);
 			return null;
 		});
@@ -193,7 +203,7 @@ export const aiAssistChecklist = async (
 			return res.json();
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = extractError(err);
 			console.error(err);
 			return null;
 		});
@@ -216,7 +226,7 @@ export const cloneQCTemplate = async (token: string, id: string) => {
 			return res.json();
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = extractError(err);
 			console.error(err);
 			return null;
 		});
@@ -246,7 +256,7 @@ export const getQCJobs = async (token: string, status?: string) => {
 			return res.json();
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = extractError(err);
 			console.error(err);
 			return null;
 		});
@@ -269,7 +279,7 @@ export const getQCJobById = async (token: string, id: string) => {
 			return res.json();
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = extractError(err);
 			console.error(err);
 			return null;
 		});
@@ -303,7 +313,7 @@ export const createQCJob = async (
 			return res.json();
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = extractError(err);
 			console.error(err);
 			return null;
 		});
@@ -338,7 +348,7 @@ export const updateQCJob = async (
 			return res.json();
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = extractError(err);
 			console.error(err);
 			return null;
 		});
@@ -361,7 +371,7 @@ export const deleteQCJob = async (token: string, id: string) => {
 			return res.json();
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = extractError(err);
 			console.error(err);
 			return null;
 		});
@@ -384,7 +394,7 @@ export const runQCJob = async (token: string, id: string) => {
 			return res.json();
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = extractError(err);
 			console.error(err);
 			return null;
 		});
@@ -409,7 +419,7 @@ export const exportQCJob = async (token: string, id: string, format: string = 'j
 			return res.json();
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = extractError(err);
 			console.error(err);
 			return null;
 		});
@@ -432,7 +442,7 @@ export const selfImproveQCTemplate = async (token: string, jobId: string) => {
 			return res.json();
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = extractError(err);
 			console.error(err);
 			return null;
 		});
@@ -459,7 +469,7 @@ export const getQCJobDocuments = async (token: string, jobId: string) => {
 			return res.json();
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = extractError(err);
 			console.error(err);
 			return null;
 		});
@@ -492,7 +502,7 @@ export const addQCJobDocument = async (
 			return res.json();
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = extractError(err);
 			console.error(err);
 			return null;
 		});
@@ -515,7 +525,7 @@ export const removeQCJobDocument = async (token: string, jobId: string, docId: s
 			return res.json();
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = extractError(err);
 			console.error(err);
 			return null;
 		});
@@ -576,7 +586,7 @@ export const getQCFindings = async (
 			return res.json();
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = extractError(err);
 			console.error(err);
 			return null;
 		});
@@ -614,7 +624,7 @@ export const createQCFinding = async (
 			return res.json();
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = extractError(err);
 			console.error(err);
 			return null;
 		});
@@ -650,7 +660,7 @@ export const updateQCFinding = async (
 			return res.json();
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = extractError(err);
 			console.error(err);
 			return null;
 		});
@@ -673,7 +683,7 @@ export const deleteQCFinding = async (token: string, jobId: string, findingId: s
 			return res.json();
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = extractError(err);
 			console.error(err);
 			return null;
 		});
@@ -703,7 +713,7 @@ export const getQCComments = async (token: string, jobId: string, findingId: str
 			return res.json();
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = extractError(err);
 			console.error(err);
 			return null;
 		});
@@ -735,7 +745,7 @@ export const createQCComment = async (
 			return res.json();
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = extractError(err);
 			console.error(err);
 			return null;
 		});
@@ -766,7 +776,7 @@ export const deleteQCComment = async (
 			return res.json();
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = extractError(err);
 			console.error(err);
 			return null;
 		});
@@ -793,7 +803,7 @@ export const getQCChecklist = async (token: string, jobId: string) => {
 			return res.json();
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = extractError(err);
 			console.error(err);
 			return null;
 		});

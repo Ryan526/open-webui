@@ -36,7 +36,7 @@
 	};
 
 	const handleDelete = async (id: string) => {
-		if (!confirm('Are you sure you want to delete this template?')) return;
+		if (!confirm($i18n.t('Are you sure you want to delete this template?'))) return;
 		try {
 			await deleteQCTemplate(localStorage.token, id);
 			toast.success($i18n.t('Template deleted'));

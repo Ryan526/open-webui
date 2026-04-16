@@ -28,7 +28,7 @@
 	};
 
 	const handleDelete = async (id: string) => {
-		if (!confirm('Are you sure you want to delete this job?')) return;
+		if (!confirm($i18n.t('Are you sure you want to delete this job?'))) return;
 		try {
 			await deleteQCJob(localStorage.token, id);
 			toast.success($i18n.t('Job deleted'));

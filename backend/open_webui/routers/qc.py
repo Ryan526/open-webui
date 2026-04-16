@@ -46,6 +46,21 @@ from open_webui.utils.auth import get_verified_user
 from open_webui.utils.access_control import has_permission
 from open_webui.internal.db import get_session
 from open_webui.constants import ERROR_MESSAGES
+from open_webui.config import QC_MAX_UPLOAD_BYTES, QC_MAX_PDF_PAGES
+
+ALLOWED_UPLOAD_CONTENT_TYPES = {
+    "application/pdf",
+    "image/png",
+    "image/jpeg",
+    "image/tiff",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/vnd.ms-excel",
+    "application/msword",
+}
+ALLOWED_UPLOAD_EXTENSIONS = (
+    ".pdf", ".png", ".jpg", ".jpeg", ".tiff", ".tif", ".xlsx", ".xls", ".docx", ".doc",
+)
 
 log = logging.getLogger(__name__)
 
@@ -381,11 +396,15 @@ async def create_job(
                         )
                 kb_context = "\n\n".join(kb_parts)
                 max_kb_chars = 500_000
-                if len(kb_context) > max_kb_chars:
+                kb_original_chars = len(kb_context)
+                if kb_original_chars > max_kb_chars:
                     log.warning(
-                        f"KB context truncated from {len(kb_context)} to {max_kb_chars} chars"
+                        f"KB context truncated from {kb_original_chars} to {max_kb_chars} chars"
                     )
                     kb_context = kb_context[:max_kb_chars]
+                    job_meta["kb_truncated"] = True
+                    job_meta["kb_original_chars"] = kb_original_chars
+                    job_meta["kb_used_chars"] = max_kb_chars
                 if kb_context:
                     job_meta["kb_context"] = kb_context
 
@@ -438,10 +457,10 @@ async def run_job(
     job = QCJobs.get_job_by_id(id)
     _check_job_access(job, user, write=True)
 
-    if job.status == "running":
+    if job.status not in ("pending", "failed"):
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Job is already running",
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Job is {job.status}; cannot start analysis. Create a new job to re-analyze.",
         )
 
     if not job.model_id:
@@ -602,21 +621,51 @@ async def add_document(
             detail="Cannot add documents while job is running",
         )
 
+    filename = file.filename or "upload"
+    content_type = file.content_type or ""
+    lowered = filename.lower()
+
+    # Content-type / extension allow-list
+    ext_ok = any(lowered.endswith(ext) for ext in ALLOWED_UPLOAD_EXTENSIONS)
+    type_ok = content_type in ALLOWED_UPLOAD_CONTENT_TYPES or content_type.startswith("image/")
+    if not (ext_ok or type_ok):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "Unsupported file type. Allowed: PDF, PNG, JPG, TIFF, XLSX, DOCX."
+            ),
+        )
+
+    # Enforce max upload size while reading (avoid loading huge files into memory)
+    file_bytes = bytearray()
+    chunk_size = 1024 * 1024
+    while True:
+        chunk = file.file.read(chunk_size)
+        if not chunk:
+            break
+        file_bytes.extend(chunk)
+        if len(file_bytes) > QC_MAX_UPLOAD_BYTES:
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail=(
+                    f"File exceeds maximum upload size of "
+                    f"{QC_MAX_UPLOAD_BYTES // (1024 * 1024)} MB."
+                ),
+            )
+    file_bytes = bytes(file_bytes)
+
     # Upload the original file
     file_id = str(uuid.uuid4())
-    filename = file.filename or "upload"
     storage_filename = f"{file_id}_{filename}"
 
     contents, file_path = Storage.upload_file(
-        file.file,
+        BytesIO(file_bytes),
         storage_filename,
         {
             "OpenWebUI-User-Id": user.id,
             "OpenWebUI-File-Id": file_id,
         },
     )
-
-    content_type = file.content_type or ""
 
     # Save file record
     Files.insert_new_file(
@@ -646,6 +695,15 @@ async def add_document(
 
         actual_file_path = Storage.get_file(file_path)
         pages = convert_pdf_to_pages(actual_file_path)
+
+        if len(pages) > QC_MAX_PDF_PAGES:
+            QCJobDocuments.delete_document(doc.id)
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail=(
+                    f"PDF has {len(pages)} pages; maximum is {QC_MAX_PDF_PAGES}."
+                ),
+            )
 
         for i, page_bytes in enumerate(pages):
             page_num = i + 1
@@ -919,7 +977,7 @@ async def create_comment(
 ):
     _check_qc_access(request, user)
     job = QCJobs.get_job_by_id(job_id)
-    _check_job_access(job, user)
+    _check_job_access(job, user, write=True)
 
     finding = QCFindings.get_finding_by_id(finding_id)
     if not finding or finding.job_id != job_id:

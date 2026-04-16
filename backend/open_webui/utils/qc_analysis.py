@@ -18,6 +18,20 @@ from open_webui.utils.qc_document import (
 log = logging.getLogger(__name__)
 
 
+async def _read_chat_completion_body(response: Any) -> dict:
+    """Normalize the various shapes generate_chat_completion can return into a parsed dict."""
+    if isinstance(response, JSONResponse):
+        return json.loads(response.body.decode("utf-8", "replace"))
+    if hasattr(response, "body_iterator"):
+        body = b""
+        async for chunk in response.body_iterator:
+            body += chunk if isinstance(chunk, bytes) else chunk.encode()
+        return json.loads(body)
+    if isinstance(response, dict):
+        return response
+    return json.loads(response)
+
+
 LEGACY_CATEGORY_MAP = {
     "equipment_tags": {
         "name": "Equipment Tag Consistency",
@@ -175,22 +189,7 @@ async def analyze_page(
             user=user,
             bypass_filter=True,
         )
-
-        # Handle response - could be a dict, StreamingResponse, or JSONResponse
-        if isinstance(response, JSONResponse):
-            response_data = json.loads(response.body.decode("utf-8", "replace"))
-        elif hasattr(response, "body_iterator"):
-            body = b""
-            async for chunk in response.body_iterator:
-                if isinstance(chunk, bytes):
-                    body += chunk
-                else:
-                    body += chunk.encode()
-            response_data = json.loads(body)
-        elif isinstance(response, dict):
-            response_data = response
-        else:
-            response_data = json.loads(response)
+        response_data = await _read_chat_completion_body(response)
 
         # Extract content from the response
         content = ""
@@ -209,14 +208,17 @@ async def analyze_page(
                 {
                     "title": "Analysis Error",
                     "description": f"Failed to analyze this page: {str(e)}",
-                    "severity": "info",
+                    "severity": "critical",
                     "location": None,
                     "checklist_item_id": None,
                     "reasoning": str(e),
+                    "_analysis_error": True,
+                    "_error_message": str(e),
                 }
             ],
             "page_summary": f"Analysis failed: {str(e)}",
             "page_result": "flagged",
+            "_analysis_error": True,
         }
 
 
@@ -417,21 +419,7 @@ async def extract_page_structured_data(
         response = await generate_chat_completion(
             request, form_data, user=user, bypass_filter=True
         )
-
-        if isinstance(response, JSONResponse):
-            response_data = json.loads(response.body.decode("utf-8", "replace"))
-        elif hasattr(response, "body_iterator"):
-            body = b""
-            async for chunk in response.body_iterator:
-                if isinstance(chunk, bytes):
-                    body += chunk
-                else:
-                    body += chunk.encode()
-            response_data = json.loads(body)
-        elif isinstance(response, dict):
-            response_data = response
-        else:
-            response_data = json.loads(response)
+        response_data = await _read_chat_completion_body(response)
 
         content = ""
         if "choices" in response_data and response_data["choices"]:
@@ -747,21 +735,7 @@ async def run_cross_reference_analysis(
             response = await generate_chat_completion(
                 request, form_data, user=user, bypass_filter=True
             )
-
-            if isinstance(response, JSONResponse):
-                response_data = json.loads(response.body.decode("utf-8", "replace"))
-            elif hasattr(response, "body_iterator"):
-                body = b""
-                async for chunk_data in response.body_iterator:
-                    if isinstance(chunk_data, bytes):
-                        body += chunk_data
-                    else:
-                        body += chunk_data.encode()
-                response_data = json.loads(body)
-            elif isinstance(response, dict):
-                response_data = response
-            else:
-                response_data = json.loads(response)
+            response_data = await _read_chat_completion_body(response)
 
             content = ""
             if "choices" in response_data and response_data["choices"]:
@@ -987,21 +961,7 @@ Based on the knowledge base content above, provide checklist items for QC docume
             user=user,
             bypass_filter=True,
         )
-
-        if isinstance(response, JSONResponse):
-            response_data = json.loads(response.body.decode("utf-8", "replace"))
-        elif hasattr(response, "body_iterator"):
-            body = b""
-            async for chunk in response.body_iterator:
-                if isinstance(chunk, bytes):
-                    body += chunk
-                else:
-                    body += chunk.encode()
-            response_data = json.loads(body)
-        elif isinstance(response, dict):
-            response_data = response
-        else:
-            response_data = json.loads(response)
+        response_data = await _read_chat_completion_body(response)
 
         # Check if this is an error response
         if "error" in response_data or "detail" in response_data:
@@ -1199,22 +1159,7 @@ Based on this review feedback, suggest changes to improve the template's system 
             user=user,
             bypass_filter=True,
         )
-
-        # Handle response
-        if isinstance(response, JSONResponse):
-            response_data = json.loads(response.body.decode("utf-8", "replace"))
-        elif hasattr(response, "body_iterator"):
-            body = b""
-            async for chunk in response.body_iterator:
-                if isinstance(chunk, bytes):
-                    body += chunk
-                else:
-                    body += chunk.encode()
-            response_data = json.loads(body)
-        elif isinstance(response, dict):
-            response_data = response
-        else:
-            response_data = json.loads(response)
+        response_data = await _read_chat_completion_body(response)
 
         # Extract content
         content = ""
@@ -1486,6 +1431,7 @@ async def run_qc_job(
     total_pages = 0
     total_findings = 0
     cross_ref_findings_count = 0
+    page_error_count = 0
     all_failed = True
     any_failed = False
 
@@ -1497,6 +1443,7 @@ async def run_qc_job(
     try:
         # ─── Cross-ref first mode: run extraction + correlation before per-page ───
         xref_findings_list: list[dict] = []
+        xref_pass_error: Optional[str] = None
         if cross_ref_first:
             log.info(f"Running cross-reference FIRST for job {job_id}")
             try:
@@ -1506,6 +1453,7 @@ async def run_qc_job(
                 )
                 total_findings += cross_ref_findings_count
             except Exception as e:
+                xref_pass_error = str(e)
                 log.error(f"Cross-ref first pass failed for job {job_id}, continuing with per-page: {e}")
 
         # ─── Per-page analysis ───
@@ -1571,6 +1519,9 @@ async def run_qc_job(
                         cross_ref_context=cross_ref_context,
                     )
 
+                    if result.get("_analysis_error"):
+                        page_error_count += 1
+
                     # Get next finding number
                     finding_number = QCFindings.get_next_finding_number(job_id)
 
@@ -1598,6 +1549,16 @@ async def run_qc_job(
                         else:
                             locations_to_create = (
                                 [ai_location] if ai_location else [None]
+                            )
+
+                        finding_meta = {
+                            "reference_text": ref_text,
+                            "location_source": location_source,
+                        }
+                        if ai_finding.get("_analysis_error"):
+                            finding_meta["error"] = True
+                            finding_meta["error_message"] = ai_finding.get(
+                                "_error_message", ""
                             )
 
                         for loc in locations_to_create:
@@ -1632,10 +1593,7 @@ async def run_qc_job(
                                         "page_result", ""
                                     ),
                                 },
-                                "meta": {
-                                    "reference_text": ref_text,
-                                    "location_source": location_source,
-                                },
+                                "meta": finding_meta,
                                 "created_at": int(time.time()),
                                 "updated_at": int(time.time()),
                             }
@@ -1702,11 +1660,15 @@ async def run_qc_job(
         # ─── Cross-reference after per-page (default mode) ───
         if cross_ref_enabled and not cross_ref_first and not all_failed:
             log.info(f"Starting cross-reference analysis for job {job_id}")
-            xref_findings_list, cross_ref_findings_count = await _run_cross_reference_pass(
-                request, job_id, job, documents, doc_pdf_paths,
-                model_id, system_prompt, categories, user, total_pages,
-            )
-            total_findings += cross_ref_findings_count
+            try:
+                xref_findings_list, cross_ref_findings_count = await _run_cross_reference_pass(
+                    request, job_id, job, documents, doc_pdf_paths,
+                    model_id, system_prompt, categories, user, total_pages,
+                )
+                total_findings += cross_ref_findings_count
+            except Exception as e:
+                xref_pass_error = str(e)
+                log.error(f"Cross-ref pass failed for job {job_id}: {e}")
 
         # Determine overall result
         findings = QCFindings.get_findings_by_job_id(job_id)
@@ -1726,6 +1688,12 @@ async def run_qc_job(
             overall_result = "pass"
             status = "completed"
 
+        # If we completed but some pages/passes had analysis errors, mark as partial
+        if status == "completed" and (
+            page_error_count > 0 or any_failed or xref_pass_error
+        ):
+            status = "partial"
+
         job_meta = {
             **(job.meta or {}),
             "progress": None,  # Clear progress indicator
@@ -1733,12 +1701,15 @@ async def run_qc_job(
                 "pages_analyzed": total_pages,
                 "findings_count": total_findings,
                 "cross_ref_findings_count": cross_ref_findings_count,
+                "page_error_count": page_error_count,
                 "critical_count": sum(1 for f in findings if f.severity == "critical"),
                 "major_count": sum(1 for f in findings if f.severity == "major"),
                 "minor_count": sum(1 for f in findings if f.severity == "minor"),
                 "info_count": sum(1 for f in findings if f.severity == "info"),
             },
         }
+        if xref_pass_error:
+            job_meta["cross_ref_error"] = xref_pass_error
 
         updated_job = QCJobs.update_job_status(
             job_id, status, overall_result=overall_result, meta=job_meta

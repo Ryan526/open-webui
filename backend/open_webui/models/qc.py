@@ -316,14 +316,20 @@ class QCCommentForm(BaseModel):
 
 class QCTemplatesTable:
     def _to_model(
-        self, template: QCTemplate, db: Optional[Session] = None
+        self,
+        template: QCTemplate,
+        db: Optional[Session] = None,
+        grants: Optional[list[AccessGrantModel]] = None,
     ) -> Optional[QCTemplateModel]:
         if not template:
             return None
         model = QCTemplateModel.model_validate(template)
-        model.access_grants = AccessGrants.get_grants_by_resource(
-            "qc_template", template.id, db=db
-        )
+        if grants is not None:
+            model.access_grants = grants
+        else:
+            model.access_grants = AccessGrants.get_grants_by_resource(
+                "qc_template", template.id, db=db
+            )
         return model
 
     def insert_new_template(
@@ -366,7 +372,13 @@ class QCTemplatesTable:
                 .order_by(QCTemplate.updated_at.desc())
                 .all()
             )
-            return [self._to_model(t, db=db) for t in templates]
+            grants_map = AccessGrants.get_grants_by_resources(
+                "qc_template", [t.id for t in templates], db=db
+            )
+            return [
+                self._to_model(t, db=db, grants=grants_map.get(t.id, []))
+                for t in templates
+            ]
 
     def get_template_by_id(
         self, id: str, db: Optional[Session] = None
@@ -414,14 +426,20 @@ class QCTemplatesTable:
 
 class QCJobsTable:
     def _to_model(
-        self, job: QCJob, db: Optional[Session] = None
+        self,
+        job: QCJob,
+        db: Optional[Session] = None,
+        grants: Optional[list[AccessGrantModel]] = None,
     ) -> Optional[QCJobModel]:
         if not job:
             return None
         model = QCJobModel.model_validate(job)
-        model.access_grants = AccessGrants.get_grants_by_resource(
-            "qc_job", job.id, db=db
-        )
+        if grants is not None:
+            model.access_grants = grants
+        else:
+            model.access_grants = AccessGrants.get_grants_by_resource(
+                "qc_job", job.id, db=db
+            )
         return model
 
     def insert_new_job(
@@ -468,7 +486,13 @@ class QCJobsTable:
             if status:
                 query = query.filter_by(status=status)
             jobs = query.order_by(QCJob.updated_at.desc()).all()
-            return [self._to_model(j, db=db) for j in jobs]
+            grants_map = AccessGrants.get_grants_by_resources(
+                "qc_job", [j.id for j in jobs], db=db
+            )
+            return [
+                self._to_model(j, db=db, grants=grants_map.get(j.id, []))
+                for j in jobs
+            ]
 
     def get_job_by_id(
         self, id: str, db: Optional[Session] = None

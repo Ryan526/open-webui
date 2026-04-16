@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { toast } from 'svelte-sonner';
-	import { onMount, getContext } from 'svelte';
+	import { onMount, onDestroy, getContext } from 'svelte';
 	import { goto } from '$app/navigation';
 
 	import {
@@ -37,6 +37,7 @@
 	let fileInput: HTMLInputElement;
 
 	let pollInterval: number | null = null;
+	let destroyed = false;
 
 	// Self-improve state
 	let selfImproveLoading = false;
@@ -49,10 +50,11 @@
 	let highlightedFindingId: string | null = null;
 
 	$: selectedDoc = documents[selectedDocIndex] || null;
-	$: pageFindings = findings.filter(
-		(f) =>
-			f.document_id === selectedDoc?.id && f.page_number === selectedPage
-	);
+	$: pageFindings = selectedDoc
+		? findings.filter(
+				(f) => f.document_id === selectedDoc.id && f.page_number === selectedPage
+			)
+		: [];
 
 	$: canSelfImprove =
 		job?.status === 'completed' &&
@@ -62,26 +64,33 @@
 
 	const loadJob = async () => {
 		try {
-			job = await getQCJobById(localStorage.token, jobId);
-			if (!job) {
+			const jobRes = await getQCJobById(localStorage.token, jobId);
+			if (destroyed) return;
+			if (!jobRes) {
 				toast.error($i18n.t('Job not found'));
 				goto('/qc/jobs');
 				return;
 			}
-			documents = (await getQCJobDocuments(localStorage.token, jobId)) || [];
-			findings = (await getQCFindings(localStorage.token, jobId)) || [];
+			job = jobRes;
+			const docsRes = (await getQCJobDocuments(localStorage.token, jobId)) || [];
+			const findingsRes = (await getQCFindings(localStorage.token, jobId)) || [];
+			if (destroyed) return;
+			documents = docsRes;
+			findings = findingsRes;
 
 			// If job is running, poll for updates
-			if (job.status === 'running' && !pollInterval) {
+			if (job.status === 'running' && !pollInterval && !destroyed) {
 				pollInterval = setInterval(async () => {
+					if (destroyed) return;
 					await loadJob();
-					if (job && job.status !== 'running') {
-						clearInterval(pollInterval!);
+					if (job && job.status !== 'running' && pollInterval) {
+						clearInterval(pollInterval);
 						pollInterval = null;
 					}
 				}, 5000) as unknown as number;
 			}
 		} catch (e) {
+			if (destroyed) return;
 			toast.error(`${e}`);
 		}
 	};
@@ -189,10 +198,14 @@
 	onMount(async () => {
 		await loadJob();
 		loading = false;
+	});
 
-		return () => {
-			if (pollInterval) clearInterval(pollInterval);
-		};
+	onDestroy(() => {
+		destroyed = true;
+		if (pollInterval) {
+			clearInterval(pollInterval);
+			pollInterval = null;
+		}
 	});
 </script>
 
@@ -254,15 +267,17 @@
 					+ {$i18n.t('Add Document')}
 				</button>
 
-				<button
-					class="px-3 py-1 text-xs font-medium bg-black text-white dark:bg-white dark:text-black rounded-lg hover:opacity-90 transition disabled:opacity-50"
-					disabled={running || documents.length === 0 || !job.model_id}
-					on:click={handleRun}
-				>
-					{running ? $i18n.t('Starting...') : $i18n.t('Run Analysis')}
-				</button>
+				{#if job.status === 'pending' || job.status === 'failed'}
+					<button
+						class="px-3 py-1 text-xs font-medium bg-black text-white dark:bg-white dark:text-black rounded-lg hover:opacity-90 transition disabled:opacity-50"
+						disabled={running || documents.length === 0 || !job.model_id}
+						on:click={handleRun}
+					>
+						{running ? $i18n.t('Starting...') : $i18n.t('Run Analysis')}
+					</button>
+				{/if}
 
-				{#if job.status === 'completed'}
+				{#if job.status === 'completed' || job.status === 'partial'}
 					<button
 						class="px-3 py-1 text-xs rounded-lg border transition flex items-center gap-1.5 {annotationMode
 							? 'bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 border-blue-300 dark:border-blue-700'
@@ -320,6 +335,25 @@
 			{/if}
 		</div>
 	</div>
+
+	{#if job.meta?.kb_truncated}
+		<div class="px-3 py-1.5 bg-yellow-50 dark:bg-yellow-900/20 border-b border-yellow-200 dark:border-yellow-800 text-xs text-yellow-800 dark:text-yellow-200">
+			{$i18n.t('Knowledge base context was truncated from {{original}} to {{used}} characters. AI analysis saw only the first portion of the standards.', {
+				original: (job.meta.kb_original_chars || 0).toLocaleString(),
+				used: (job.meta.kb_used_chars || 0).toLocaleString()
+			})}
+		</div>
+	{/if}
+	{#if job.status === 'partial'}
+		<div class="px-3 py-1.5 bg-orange-50 dark:bg-orange-900/20 border-b border-orange-200 dark:border-orange-800 text-xs text-orange-800 dark:text-orange-200">
+			{$i18n.t('Analysis partially failed. {{count}} page(s) errored during analysis. Findings marked with an error flag in their meta.', {
+				count: job.meta?.statistics?.page_error_count ?? 0
+			})}
+			{#if job.meta?.cross_ref_error}
+				{$i18n.t('Cross-reference analysis also failed: {{error}}', { error: job.meta.cross_ref_error })}
+			{/if}
+		</div>
+	{/if}
 
 	{#if documents.length === 0}
 		<!-- No documents - show upload prompt -->
