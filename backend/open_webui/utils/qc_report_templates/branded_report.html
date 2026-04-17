@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8"/>
+<style>
+  @page { size: letter; margin: 48pt; }
+  body { font-family: Helvetica, Arial, sans-serif; color: #1a1a1a; font-size: 10pt; line-height: 1.35; }
+  h1 { color: {{ branding.primary_color | default('#1a1a1a') }}; font-size: 22pt; margin: 0 0 4pt 0; }
+  h2 { font-size: 14pt; margin: 18pt 0 6pt 0; color: {{ branding.primary_color | default('#1a1a1a') }}; border-bottom: 1pt solid #cccccc; padding-bottom: 3pt; }
+  h3 { font-size: 11pt; margin: 10pt 0 4pt 0; }
+  .cover { page-break-after: always; text-align: left; }
+  .cover .logo img { max-width: 180pt; max-height: 60pt; margin-bottom: 24pt; }
+  .cover .meta { color: #555; margin-top: 6pt; }
+  .cover .title { font-size: 26pt; font-weight: bold; margin-top: 60pt; color: {{ branding.primary_color | default('#1a1a1a') }}; }
+  .cover .subtitle { color: #555; font-size: 13pt; margin-top: 8pt; }
+  .summary-grid { margin-top: 12pt; }
+  .summary-row { display: block; padding: 4pt 0; border-bottom: 1pt solid #eeeeee; }
+  .summary-row .label { color: #555; display: inline-block; width: 140pt; }
+  .finding { margin: 10pt 0 14pt 0; padding: 8pt 10pt; border: 1pt solid #dddddd; border-radius: 4pt; page-break-inside: avoid; }
+  .finding .hdr { font-weight: bold; font-size: 10.5pt; }
+  .sev { display: inline-block; padding: 1pt 6pt; border-radius: 3pt; font-size: 8.5pt; color: white; margin-right: 6pt; font-weight: bold; }
+  .sev-critical { background: #dc2626; }
+  .sev-major { background: #ea580c; }
+  .sev-minor { background: #ca8a04; }
+  .sev-info { background: #2563eb; }
+  .finding .meta-row { color: #555; font-size: 9pt; margin-top: 2pt; }
+  .finding .desc { margin-top: 4pt; white-space: pre-wrap; }
+  .finding .img { margin-top: 6pt; }
+  .finding .img img { max-width: 420pt; max-height: 260pt; border: 1pt solid #cccccc; }
+  .footer { color: #888; font-size: 8pt; margin-top: 24pt; }
+</style>
+</head>
+<body>
+
+<div class="cover">
+  {% if branding.logo_data_uri %}
+  <div class="logo"><img src="{{ branding.logo_data_uri }}"/></div>
+  {% endif %}
+  <div class="title">QC Review Report</div>
+  <div class="subtitle">{{ job.name }}</div>
+  <div class="summary-grid">
+    {% if branding.client_name %}<div class="summary-row"><span class="label">Client</span>{{ branding.client_name }}</div>{% endif %}
+    {% if branding.project_number %}<div class="summary-row"><span class="label">Project #</span>{{ branding.project_number }}</div>{% endif %}
+    <div class="summary-row"><span class="label">Generated</span>{{ generated_at }}</div>
+    <div class="summary-row"><span class="label">Documents</span>{{ documents|length }}</div>
+    <div class="summary-row"><span class="label">Total findings</span>{{ findings|length }}</div>
+    {% if job.revision_label %}<div class="summary-row"><span class="label">Revision</span>{{ job.revision_label }}</div>{% endif %}
+  </div>
+</div>
+
+<h2>Executive Summary</h2>
+<div class="summary-grid">
+  {% for sev, count in severity_counts.items() %}
+  <div class="summary-row"><span class="label"><span class="sev sev-{{ sev }}">{{ sev|upper }}</span></span>{{ count }} finding{{ 's' if count != 1 else '' }}</div>
+  {% endfor %}
+</div>
+
+{% for sev in severity_order %}
+  {% set group = findings_by_severity.get(sev, []) %}
+  {% if group %}
+  <h2>{{ sev|capitalize }} ({{ group|length }})</h2>
+  {% for f in group %}
+  <div class="finding">
+    <div class="hdr"><span class="sev sev-{{ f.severity }}">{{ f.severity|upper }}</span>#{{ f.finding_number }} — {{ f.title }}</div>
+    <div class="meta-row">
+      {% if f.document_name %}{{ f.document_name }}{% endif %}
+      {% if f.page_number %}&middot; Page {{ f.page_number }}{% endif %}
+      {% if f.status %}&middot; Status: {{ f.status }}{% endif %}
+      {% if f.revision_state %}&middot; {{ f.revision_state }}{% endif %}
+    </div>
+    {% if f.description %}<div class="desc">{{ f.description }}</div>{% endif %}
+    {% if f.image_data_uri %}<div class="img"><img src="{{ f.image_data_uri }}"/></div>{% endif %}
+  </div>
+  {% endfor %}
+  {% endif %}
+{% endfor %}
+
+{% if branding.footer %}<div class="footer">{{ branding.footer }}</div>{% endif %}
+
+</body>
+</html>

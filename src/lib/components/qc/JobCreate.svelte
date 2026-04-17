@@ -3,13 +3,23 @@
 	import { onMount, getContext } from 'svelte';
 	import { goto } from '$app/navigation';
 
-	import { getQCTemplates, createQCJob, addQCJobDocument } from '$lib/apis/qc';
+	import {
+		getQCTemplates,
+		createQCJob,
+		addQCJobDocument,
+		getQCProjects,
+		getQCJobs,
+		getQCTemplateVersions
+	} from '$lib/apis/qc';
 	import { models } from '$lib/stores';
 	import Spinner from '$lib/components/common/Spinner.svelte';
 
 	const i18n = getContext('i18n');
 
 	let templates: any[] = [];
+	let projects: any[] = [];
+	let candidateRevisionJobs: any[] = [];
+	let templateVersions: any[] = [];
 	let loading = true;
 	let creating = false;
 	let uploading = false;
@@ -17,6 +27,10 @@
 	let name = '';
 	let selectedTemplateId = '';
 	let selectedModelId = '';
+	let selectedProjectId = '';
+	let selectedPrevJobId = '';
+	let selectedTemplateVersionId = '';
+	let revisionLabel = '';
 	let files: FileList | null = null;
 	let uploadedFiles: { name: string; type: string; size: number }[] = [];
 
@@ -44,6 +58,26 @@
 		}
 	}
 
+	const loadTemplateVersions = async (tplId: string) => {
+		if (!tplId) {
+			templateVersions = [];
+			selectedTemplateVersionId = '';
+			return;
+		}
+		try {
+			templateVersions = (await getQCTemplateVersions(localStorage.token, tplId)) || [];
+		} catch (e) {
+			templateVersions = [];
+		}
+		selectedTemplateVersionId = '';
+	};
+
+	let lastTplId = '';
+	$: if (selectedTemplateId !== lastTplId) {
+		lastTplId = selectedTemplateId;
+		loadTemplateVersions(selectedTemplateId);
+	}
+
 	const handleCreate = async () => {
 		if (!name.trim()) {
 			toast.error($i18n.t('Job name is required'));
@@ -59,7 +93,11 @@
 			const job = await createQCJob(localStorage.token, {
 				name: name.trim(),
 				template_id: selectedTemplateId || undefined,
-				model_id: selectedModelId
+				template_version_id: selectedTemplateVersionId || undefined,
+				model_id: selectedModelId,
+				project_id: selectedProjectId || undefined,
+				previous_job_id: selectedPrevJobId || undefined,
+				revision_label: revisionLabel.trim() || undefined
 			});
 
 			if (job) {
@@ -95,9 +133,28 @@
 		}
 	};
 
+	const loadPrevCandidates = async () => {
+		try {
+			const allJobs = (await getQCJobs(localStorage.token)) || [];
+			candidateRevisionJobs = selectedProjectId
+				? allJobs.filter((j: any) => j.project_id === selectedProjectId)
+				: allJobs;
+		} catch (e) {
+			candidateRevisionJobs = [];
+		}
+	};
+
+	$: if (selectedProjectId !== undefined) {
+		// Reset prev-job selection when project changes
+		selectedPrevJobId = '';
+		loadPrevCandidates();
+	}
+
 	onMount(async () => {
 		try {
 			templates = (await getQCTemplates(localStorage.token)) || [];
+			projects = (await getQCProjects(localStorage.token)) || [];
+			await loadPrevCandidates();
 		} catch (e) {
 			toast.error(`${e}`);
 		}
@@ -165,6 +222,31 @@
 				{/if}
 			</div>
 
+			{#if selectedTemplateId && templateVersions.length > 0}
+				<div>
+					<label class="block text-sm font-medium mb-1" for="job-template-version"
+						>{$i18n.t('Template Version')}</label
+					>
+					<select
+						id="job-template-version"
+						bind:value={selectedTemplateVersionId}
+						class="w-full text-sm rounded-xl border border-gray-200 dark:border-gray-800 bg-transparent px-3 py-2 outline-none"
+					>
+						<option value=""
+							>{$i18n.t('Current (v{{n}})', { n: templateVersions[0]?.version_number ?? '?' })}</option
+						>
+						{#each templateVersions as v}
+							<option value={v.id}
+								>v{v.version_number} ({v.change_source}){selectedTemplate?.current_version_id ===
+								v.id
+									? ' · current'
+									: ''}</option
+							>
+						{/each}
+					</select>
+				</div>
+			{/if}
+
 			<!-- Model Selection -->
 			<div>
 				<label class="block text-sm font-medium mb-1" for="job-model">{$i18n.t('Model')}</label>
@@ -179,6 +261,53 @@
 					{/each}
 				</select>
 			</div>
+
+			<!-- Project & Revision (optional) -->
+			<div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+				<div>
+					<label class="block text-sm font-medium mb-1" for="job-project">{$i18n.t('Project (Optional)')}</label>
+					<select
+						id="job-project"
+						bind:value={selectedProjectId}
+						class="w-full text-sm rounded-xl border border-gray-200 dark:border-gray-800 bg-transparent px-3 py-2 outline-none"
+					>
+						<option value="">{$i18n.t('No project')}</option>
+						{#each projects as project}
+							<option value={project.id}>{project.name}</option>
+						{/each}
+					</select>
+				</div>
+				<div>
+					<label class="block text-sm font-medium mb-1" for="job-prev">{$i18n.t('Previous Revision (Optional)')}</label>
+					<select
+						id="job-prev"
+						bind:value={selectedPrevJobId}
+						class="w-full text-sm rounded-xl border border-gray-200 dark:border-gray-800 bg-transparent px-3 py-2 outline-none"
+					>
+						<option value="">{$i18n.t('None (base revision)')}</option>
+						{#each candidateRevisionJobs as job}
+							<option value={job.id}>
+								{job.revision_index !== null && job.revision_index !== undefined
+									? `Rev ${job.revision_index} · `
+									: ''}{job.name}
+							</option>
+						{/each}
+					</select>
+				</div>
+			</div>
+
+			{#if selectedPrevJobId}
+				<div>
+					<label class="block text-sm font-medium mb-1" for="job-revision-label">{$i18n.t('Revision Label (Optional)')}</label>
+					<input
+						id="job-revision-label"
+						type="text"
+						bind:value={revisionLabel}
+						placeholder={$i18n.t('E.g., Rev B, IFC, Permit Set')}
+						class="w-full text-sm rounded-xl border border-gray-200 dark:border-gray-800 bg-transparent px-3 py-2 outline-none"
+					/>
+				</div>
+			{/if}
 
 			<!-- Document Upload -->
 			<div>

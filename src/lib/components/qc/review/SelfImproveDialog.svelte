@@ -83,14 +83,19 @@
 
 			meta.checklist = checklist;
 
-			// Update template
-			await updateQCTemplate(localStorage.token, suggestions.template_id, {
-				name: template.name,
-				description: template.description,
-				system_prompt: systemPrompt.trim(),
-				model_id: template.model_id,
-				meta
-			});
+			// Update template — tag version as self-improve for template history
+			await updateQCTemplate(
+				localStorage.token,
+				suggestions.template_id,
+				{
+					name: template.name,
+					description: template.description,
+					system_prompt: systemPrompt.trim(),
+					model_id: template.model_id,
+					meta
+				},
+				{ change_source: 'self_improve', change_summary: 'Applied self-improve suggestions' }
+			);
 
 			toast.success($i18n.t('Template updated successfully'));
 			show = false;

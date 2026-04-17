@@ -74,6 +74,38 @@
 								: 'text-gray-300 dark:text-gray-600 hover:text-gray-700 dark:hover:text-white'} transition select-none"
 							href="/qc/jobs">{$i18n.t('Jobs')}</a
 						>
+						<a
+							draggable="false"
+							aria-current={$page.url.pathname.includes('/qc/projects') ? 'page' : null}
+							class="min-w-fit p-1.5 {$page.url.pathname.includes('/qc/projects')
+								? ''
+								: 'text-gray-300 dark:text-gray-600 hover:text-gray-700 dark:hover:text-white'} transition select-none"
+							href="/qc/projects">{$i18n.t('Projects')}</a
+						>
+						<a
+							draggable="false"
+							aria-current={$page.url.pathname.includes('/qc/suppression-rules') ? 'page' : null}
+							class="min-w-fit p-1.5 {$page.url.pathname.includes('/qc/suppression-rules')
+								? ''
+								: 'text-gray-300 dark:text-gray-600 hover:text-gray-700 dark:hover:text-white'} transition select-none"
+							href="/qc/suppression-rules">{$i18n.t('Suppression')}</a
+						>
+						<a
+							draggable="false"
+							aria-current={$page.url.pathname.includes('/qc/test-sets') ? 'page' : null}
+							class="min-w-fit p-1.5 {$page.url.pathname.includes('/qc/test-sets')
+								? ''
+								: 'text-gray-300 dark:text-gray-600 hover:text-gray-700 dark:hover:text-white'} transition select-none"
+							href="/qc/test-sets">{$i18n.t('Test Sets')}</a
+						>
+						<a
+							draggable="false"
+							aria-current={$page.url.pathname.includes('/qc/test-runs') ? 'page' : null}
+							class="min-w-fit p-1.5 {$page.url.pathname.includes('/qc/test-runs')
+								? ''
+								: 'text-gray-300 dark:text-gray-600 hover:text-gray-700 dark:hover:text-white'} transition select-none"
+							href="/qc/test-runs">{$i18n.t('Test Runs')}</a
+						>
 					</div>
 				</div>
 			</div>

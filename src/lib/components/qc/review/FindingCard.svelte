@@ -7,6 +7,8 @@
 
 	export let finding: any;
 	export let highlighted: boolean = false;
+	export let selectable: boolean = false;
+	export let selected: boolean = false;
 
 	let expanded = false;
 	let cardEl: HTMLDivElement;
@@ -43,12 +45,21 @@
 
 <div
 	bind:this={cardEl}
-	class="px-3 py-2.5 hover:bg-gray-50 dark:hover:bg-gray-850/50 transition {highlighted ? 'bg-blue-50 dark:bg-blue-900/20 ring-1 ring-blue-300 dark:ring-blue-700' : ''}"
+	class="px-3 py-2.5 hover:bg-gray-50 dark:hover:bg-gray-850/50 transition {highlighted ? 'bg-blue-50 dark:bg-blue-900/20 ring-1 ring-blue-300 dark:ring-blue-700' : ''} {finding.revision_state === 'resolved' ? 'opacity-60' : ''}"
 	on:mouseenter={() => dispatch('highlight', finding.id)}
 	on:mouseleave={() => dispatch('highlight', null)}
 >
 	<!-- Header row -->
 	<div class="flex items-start gap-2">
+		{#if selectable}
+			<input
+				type="checkbox"
+				class="mt-1.5 shrink-0 accent-blue-500"
+				checked={selected}
+				on:click|stopPropagation
+				on:change={(e) => dispatch('toggleSelect', (e.target as HTMLInputElement).checked)}
+			/>
+		{/if}
 		<!-- Finding number badge -->
 		{#if finding.source === 'cross_reference'}
 			<!-- Cross-reference link icon -->
@@ -85,6 +96,30 @@
 				{#if finding.source === 'cross_reference'}
 					<span class="text-[10px] px-1.5 py-0.5 rounded bg-purple-500/15 text-purple-600 dark:text-purple-400 font-medium">
 						X-REF
+					</span>
+				{/if}
+				{#if finding.revision_state === 'carried_over'}
+					<span
+						class="text-[10px] px-1.5 py-0.5 rounded bg-green-500/15 text-green-700 dark:text-green-400 font-medium"
+						title={finding.previous_finding_id ? $i18n.t('Linked to previous revision') : ''}
+					>
+						CARRIED OVER
+					</span>
+				{:else if finding.revision_state === 'new'}
+					<span class="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/15 text-blue-700 dark:text-blue-400 font-medium">
+						NEW
+					</span>
+				{:else if finding.revision_state === 'resolved'}
+					<span class="text-[10px] px-1.5 py-0.5 rounded bg-gray-500/15 text-gray-600 dark:text-gray-400 font-medium">
+						RESOLVED
+					</span>
+				{/if}
+				{#if finding.canonical_finding_id}
+					<span
+						class="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-700 dark:text-amber-400 font-medium"
+						title={$i18n.t('Duplicate of another finding')}
+					>
+						DUP
 					</span>
 				{/if}
 			</div>
@@ -196,9 +231,23 @@
 					</div>
 				</div>
 			{/if}
-			<div class="flex items-center gap-2 pt-1">
+			<div class="flex items-center gap-3 pt-1 flex-wrap">
 				<button
-					class="text-red-500 hover:text-red-700 transition text-xs"
+					class="text-xs text-gray-600 dark:text-gray-300 hover:text-black dark:hover:text-white"
+					on:click={() => dispatch('editLocation')}
+				>
+					{$i18n.t('Edit Location')}
+				</button>
+				{#if finding.status === 'dismissed'}
+					<button
+						class="text-xs text-purple-600 dark:text-purple-400 hover:underline"
+						on:click={() => dispatch('createRule')}
+					>
+						{$i18n.t('Create suppression rule')}
+					</button>
+				{/if}
+				<button
+					class="text-red-500 hover:text-red-700 transition text-xs ml-auto"
 					on:click={() => dispatch('delete')}
 				>
 					{$i18n.t('Delete')}

@@ -11,6 +11,7 @@
 	import Tooltip from '$lib/components/common/Tooltip.svelte';
 	import Collapsible from '$lib/components/common/Collapsible.svelte';
 	import KnowledgeSelector from '$lib/components/workspace/Models/Knowledge/KnowledgeSelector.svelte';
+	import VersionList from './versions/VersionList.svelte';
 
 	const i18n = getContext('i18n');
 
@@ -18,6 +19,8 @@
 
 	let loading = true;
 	let saving = false;
+	let currentVersionId: string | null = null;
+	let versionsReloadKey = 0;
 
 	let name = '';
 	let description = '';
@@ -32,7 +35,35 @@
 			enabled: false,
 			cross_ref_first: false,
 			categories: []
+		},
+		branding: {
+			primary_color: '#1a1a1a',
+			client_name: '',
+			project_number: '',
+			footer: '',
+			logo_file_id: null
 		}
+	};
+
+	let brandingOpen = false;
+	let brandingLogoFile: File | null = null;
+	let brandingLogoInput: HTMLInputElement;
+
+	const handleBrandingLogoUpload = async () => {
+		const file = brandingLogoFile;
+		if (!file) return;
+		try {
+			const { uploadFile } = await import('$lib/apis/files');
+			const result = await uploadFile(localStorage.token, file);
+			if (result && result.id) {
+				meta.branding = { ...(meta.branding || {}), logo_file_id: result.id };
+				toast.success($i18n.t('Logo uploaded'));
+			}
+		} catch (e) {
+			toast.error(`${e}`);
+		}
+		brandingLogoFile = null;
+		if (brandingLogoInput) brandingLogoInput.value = '';
 	};
 
 	// Legacy category migration map
@@ -349,7 +380,9 @@
 			};
 
 			if (templateId) {
-				await updateQCTemplate(localStorage.token, templateId, data);
+				const updated = await updateQCTemplate(localStorage.token, templateId, data);
+				if (updated) currentVersionId = updated.current_version_id || currentVersionId;
+				versionsReloadKey++;
 				toast.success($i18n.t('Template updated'));
 			} else {
 				const result = await createQCTemplate(localStorage.token, data);
@@ -369,6 +402,7 @@
 			try {
 				const template = await getQCTemplateById(localStorage.token, templateId);
 				if (template) {
+					currentVersionId = template.current_version_id || null;
 					name = template.name;
 					description = template.description || '';
 					system_prompt = template.system_prompt || '';
@@ -382,8 +416,19 @@
 							enabled: false,
 							categories: []
 						},
+						branding: {
+							primary_color: '#1a1a1a',
+							client_name: '',
+							project_number: '',
+							footer: '',
+							logo_file_id: null
+						},
 						...(template.meta || {})
 					};
+					// Ensure branding exists (since spread may overwrite with missing)
+					if (!meta.branding) {
+						meta.branding = { primary_color: '#1a1a1a', client_name: '', project_number: '', footer: '', logo_file_id: null };
+					}
 					// Migrate legacy string-based categories to object format
 					if (meta.cross_reference_analysis?.categories) {
 						meta.cross_reference_analysis.categories = migrateLegacyCategories(
@@ -1059,6 +1104,105 @@
 					</div>
 				{/if}
 			</div>
+
+			<!-- Report Branding -->
+			<div>
+				<button
+					type="button"
+					class="w-full flex items-center justify-between py-2 text-sm font-medium"
+					on:click={() => (brandingOpen = !brandingOpen)}
+				>
+					<span>{$i18n.t('Report Branding')}</span>
+					<span class="text-xs text-gray-400">{brandingOpen ? '−' : '+'}</span>
+				</button>
+				{#if brandingOpen}
+					<div class="space-y-3 pt-2">
+						<p class="text-xs text-gray-500">
+							{$i18n.t('Used when generating Branded PDF reports. Individual jobs can override these in job meta.')}
+						</p>
+						<div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+							<div>
+								<label class="block text-xs text-gray-500 mb-1" for="branding-client">{$i18n.t('Client name')}</label>
+								<input
+									id="branding-client"
+									type="text"
+									bind:value={meta.branding.client_name}
+									class="w-full text-sm rounded-xl border border-gray-200 dark:border-gray-800 bg-transparent px-3 py-2 outline-none"
+								/>
+							</div>
+							<div>
+								<label class="block text-xs text-gray-500 mb-1" for="branding-project">{$i18n.t('Project number')}</label>
+								<input
+									id="branding-project"
+									type="text"
+									bind:value={meta.branding.project_number}
+									class="w-full text-sm rounded-xl border border-gray-200 dark:border-gray-800 bg-transparent px-3 py-2 outline-none"
+								/>
+							</div>
+						</div>
+						<div>
+							<label class="block text-xs text-gray-500 mb-1" for="branding-color">{$i18n.t('Primary color')}</label>
+							<input
+								id="branding-color"
+								type="color"
+								bind:value={meta.branding.primary_color}
+								class="h-9 w-16 rounded-lg border border-gray-200 dark:border-gray-800 bg-transparent p-1"
+							/>
+						</div>
+						<div>
+							<label class="block text-xs text-gray-500 mb-1" for="branding-footer">{$i18n.t('Footer text')}</label>
+							<input
+								id="branding-footer"
+								type="text"
+								bind:value={meta.branding.footer}
+								placeholder={$i18n.t('© Your Firm — Confidential')}
+								class="w-full text-sm rounded-xl border border-gray-200 dark:border-gray-800 bg-transparent px-3 py-2 outline-none"
+							/>
+						</div>
+						<div>
+							<label class="block text-xs text-gray-500 mb-1">{$i18n.t('Logo')}</label>
+							<div class="flex items-center gap-3">
+								<input
+									bind:this={brandingLogoInput}
+									type="file"
+									accept="image/png,image/jpeg,image/webp"
+									on:change={(e) => {
+										const fl = (e.target as HTMLInputElement).files;
+										brandingLogoFile = fl && fl[0] ? fl[0] : null;
+										handleBrandingLogoUpload();
+									}}
+									class="text-xs"
+								/>
+								{#if meta.branding.logo_file_id}
+									<span class="text-xs text-gray-500">{$i18n.t('Current logo file ID')}: {meta.branding.logo_file_id.slice(0, 8)}...</span>
+									<button
+										class="text-xs text-red-500 hover:underline"
+										on:click={() => (meta.branding = { ...meta.branding, logo_file_id: null })}
+									>
+										{$i18n.t('Remove')}
+									</button>
+								{/if}
+							</div>
+						</div>
+					</div>
+				{/if}
+			</div>
+
+			{#if templateId}
+				<div class="mt-6 pt-4 border-t border-gray-200 dark:border-gray-800">
+					{#key versionsReloadKey}
+						<VersionList
+							{templateId}
+							{currentVersionId}
+							on:restored={() => {
+								versionsReloadKey++;
+								// Reload template details so UI reflects restored content
+								location.reload();
+							}}
+						/>
+					{/key}
+				</div>
+			{/if}
 		</div>
 	</div>
 {/if}

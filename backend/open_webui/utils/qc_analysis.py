@@ -1222,15 +1222,23 @@ async def _run_cross_reference_pass(
     categories: list[dict],
     user: Any,
     total_pages: int,
+    suppression_rules: Optional[list] = None,
 ) -> tuple[list[dict], int]:
     """
     Run cross-ref extraction + correlation.
     Returns (xref_findings_list, cross_ref_findings_count).
     Also inserts findings into DB.
     """
-    from open_webui.models.qc import QCJobs, QCJobDocuments, QCFindings
+    from open_webui.models.qc import (
+        QCJobs,
+        QCJobDocuments,
+        QCFindings,
+        QCSuppressionRules,
+        QCSuppressionEvents,
+    )
     from open_webui.models.files import Files
     from open_webui.storage.provider import Storage
+    from open_webui.utils.qc_suppression import evaluate_ai_finding, compute_dup_cluster_key
 
     # Update progress
     progress_meta = {**(job.meta or {}), "progress": {
@@ -1314,6 +1322,30 @@ async def _run_cross_reference_pass(
 
         # Insert cross-reference findings
         for xref_finding in xref_findings:
+            # Suppression gate (cross-ref)
+            if suppression_rules:
+                should_suppress, matched_rule_id = evaluate_ai_finding(
+                    xref_finding,
+                    suppression_rules,
+                    page_type=None,
+                    checklist_item_id=None,
+                )
+                if should_suppress and matched_rule_id:
+                    try:
+                        QCSuppressionRules.record_hit(matched_rule_id)
+                        refs0 = xref_finding.get("references") or [{}]
+                        QCSuppressionEvents.insert_event(
+                            matched_rule_id,
+                            job_id,
+                            refs0[0].get("document_id") if refs0 else None,
+                            refs0[0].get("page_number") if refs0 else None,
+                            xref_finding.get("title"),
+                            xref_finding,
+                        )
+                    except Exception as e:
+                        log.warning(f"Failed to record suppression event: {e}")
+                    continue
+
             refs = xref_finding.get("references", [])
             # Use first reference as the primary location
             primary_doc_id = refs[0]["document_id"] if refs else None
@@ -1321,6 +1353,7 @@ async def _run_cross_reference_pass(
             primary_ref_text = refs[0].get("reference_text") if refs else None
 
             finding_number = QCFindings.get_next_finding_number(job_id)
+            title_val = xref_finding.get("title", "Cross-Reference Issue")
             finding_data = {
                 "id": str(uuid.uuid4()),
                 "job_id": job_id,
@@ -1332,12 +1365,15 @@ async def _run_cross_reference_pass(
                 "checklist_item_id": None,
                 "severity": xref_finding.get("severity", "major"),
                 "status": "open",
-                "title": xref_finding.get("title", "Cross-Reference Issue"),
+                "title": title_val,
                 "description": xref_finding.get("description", ""),
                 "location": None,
                 "ai_response": {
                     "reasoning": xref_finding.get("reasoning", ""),
                 },
+                "dup_cluster_key": compute_dup_cluster_key(
+                    title_val, primary_doc_id, primary_page, None
+                ),
                 "meta": {
                     "source": "cross_reference",
                     "cross_ref_type": xref_finding.get("cross_ref_type", ""),
@@ -1428,6 +1464,27 @@ async def run_qc_job(
     raw_categories = cross_ref_config.get("categories", [])
     categories = _migrate_legacy_categories(raw_categories)
 
+    # Load suppression rules (template + project + global) for this job
+    from open_webui.models.qc import QCSuppressionRules, QCSuppressionEvents
+    active_suppression_rules: list = []
+    try:
+        tmpl_id = getattr(job, "template_id", None)
+        proj_id = getattr(job, "project_id", None)
+        if tmpl_id:
+            active_suppression_rules.extend(
+                QCSuppressionRules.get_rules(template_id=tmpl_id, enabled_only=True)
+            )
+        if proj_id:
+            active_suppression_rules.extend(
+                QCSuppressionRules.get_rules(project_id=proj_id, enabled_only=True)
+            )
+        active_suppression_rules.extend(
+            QCSuppressionRules.get_rules(scope="global", enabled_only=True)
+        )
+    except Exception as e:
+        log.warning(f"Failed to load suppression rules for job {job_id}: {e}")
+    suppression_hit_count = 0
+
     total_pages = 0
     total_findings = 0
     cross_ref_findings_count = 0
@@ -1450,6 +1507,7 @@ async def run_qc_job(
                 xref_findings_list, cross_ref_findings_count = await _run_cross_reference_pass(
                     request, job_id, job, documents, doc_pdf_paths,
                     model_id, system_prompt, categories, user, total_pages,
+                    suppression_rules=active_suppression_rules,
                 )
                 total_findings += cross_ref_findings_count
             except Exception as e:
@@ -1529,6 +1587,31 @@ async def run_qc_job(
                     pdf_path = doc_pdf_paths.get(doc.id)
 
                     for ai_finding in result.get("findings", []):
+                        # Suppression gate (per-page findings)
+                        if active_suppression_rules:
+                            from open_webui.utils.qc_suppression import evaluate_ai_finding
+                            should_suppress, matched_rule_id = evaluate_ai_finding(
+                                ai_finding,
+                                active_suppression_rules,
+                                page_type=ai_finding.get("page_type"),
+                                checklist_item_id=ai_finding.get("checklist_item_id"),
+                            )
+                            if should_suppress and matched_rule_id:
+                                try:
+                                    QCSuppressionRules.record_hit(matched_rule_id)
+                                    QCSuppressionEvents.insert_event(
+                                        matched_rule_id,
+                                        job_id,
+                                        doc.id,
+                                        page_num,
+                                        ai_finding.get("title"),
+                                        ai_finding,
+                                    )
+                                    suppression_hit_count += 1
+                                except Exception as e:
+                                    log.warning(f"Failed to record suppression event: {e}")
+                                continue
+
                         ref_text = ai_finding.get("reference_text")
                         ai_location = ai_finding.get("location")
                         location_source = "ai"
@@ -1562,6 +1645,9 @@ async def run_qc_job(
                             )
 
                         for loc in locations_to_create:
+                            from open_webui.utils.qc_suppression import compute_dup_cluster_key
+
+                            title_val = ai_finding.get("title", "Untitled Finding")
                             finding_data = {
                                 "id": str(uuid.uuid4()),
                                 "job_id": job_id,
@@ -1575,9 +1661,7 @@ async def run_qc_job(
                                 ),
                                 "severity": ai_finding.get("severity", "info"),
                                 "status": "open",
-                                "title": ai_finding.get(
-                                    "title", "Untitled Finding"
-                                ),
+                                "title": title_val,
                                 "description": ai_finding.get(
                                     "description", ""
                                 ),
@@ -1593,6 +1677,9 @@ async def run_qc_job(
                                         "page_result", ""
                                     ),
                                 },
+                                "dup_cluster_key": compute_dup_cluster_key(
+                                    title_val, doc.id, page_num, loc
+                                ),
                                 "meta": finding_meta,
                                 "created_at": int(time.time()),
                                 "updated_at": int(time.time()),
@@ -1664,11 +1751,20 @@ async def run_qc_job(
                 xref_findings_list, cross_ref_findings_count = await _run_cross_reference_pass(
                     request, job_id, job, documents, doc_pdf_paths,
                     model_id, system_prompt, categories, user, total_pages,
+                    suppression_rules=active_suppression_rules,
                 )
                 total_findings += cross_ref_findings_count
             except Exception as e:
                 xref_pass_error = str(e)
                 log.error(f"Cross-ref pass failed for job {job_id}: {e}")
+
+        # Link duplicates after all findings are inserted
+        duplicates_linked = 0
+        try:
+            from open_webui.utils.qc_duplicates import find_and_link_duplicates
+            duplicates_linked = find_and_link_duplicates(job_id)
+        except Exception as e:
+            log.warning(f"Duplicate linking failed for job {job_id}: {e}")
 
         # Determine overall result
         findings = QCFindings.get_findings_by_job_id(job_id)
@@ -1706,6 +1802,8 @@ async def run_qc_job(
                 "major_count": sum(1 for f in findings if f.severity == "major"),
                 "minor_count": sum(1 for f in findings if f.severity == "minor"),
                 "info_count": sum(1 for f in findings if f.severity == "info"),
+                "duplicates_linked": duplicates_linked,
+                "suppressed_count": suppression_hit_count,
             },
         }
         if xref_pass_error:
@@ -1714,6 +1812,52 @@ async def run_qc_job(
         updated_job = QCJobs.update_job_status(
             job_id, status, overall_result=overall_result, meta=job_meta
         )
+
+        # Test-harness hook: if this job is a shadow for a test run, compute metrics
+        try:
+            test_run_id = getattr(job, "test_run_id", None)
+            if test_run_id:
+                from open_webui.models.qc import (
+                    QCTestRuns,
+                    QCTestSetExpectedFindings,
+                    QCTestSetDocuments,
+                )
+                from open_webui.utils.qc_testrun import compute_test_metrics
+
+                run = QCTestRuns.get_run_by_id(test_run_id)
+                if run:
+                    expected = QCTestSetExpectedFindings.get_expected_by_test_set_id(
+                        run.test_set_id
+                    )
+                    ts_docs = QCTestSetDocuments.get_documents_by_test_set_id(
+                        run.test_set_id
+                    )
+                    # Build file-id mapping for produced (qc_job_document.id -> file_id)
+                    produced_docs = QCJobDocuments.get_documents_by_job_id(job_id)
+                    produced_map = {d.id: d.file_id for d in produced_docs}
+                    expected_map = {d.id: d.file_id for d in ts_docs}
+
+                    produced_findings = QCFindings.get_findings_by_job_id(job_id) or []
+                    metrics = compute_test_metrics(
+                        [f.model_dump() for f in produced_findings],
+                        [e.model_dump() for e in expected],
+                        produced_doc_file_ids=produced_map,
+                        expected_doc_file_ids=expected_map,
+                    )
+                    QCTestRuns.update_run(
+                        test_run_id,
+                        status="completed" if status in ("completed", "partial") else "failed",
+                        metrics=metrics,
+                    )
+        except Exception as e:
+            log.warning(f"Failed to compute test-run metrics for job {job_id}: {e}")
+            try:
+                from open_webui.models.qc import QCTestRuns
+                if getattr(job, "test_run_id", None):
+                    QCTestRuns.update_run(job.test_run_id, status="failed")
+            except Exception:
+                pass
+
         return updated_job.model_dump() if updated_job else {}
 
     except Exception as e:

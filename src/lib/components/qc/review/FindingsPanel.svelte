@@ -2,9 +2,15 @@
 	import { toast } from 'svelte-sonner';
 	import { getContext, createEventDispatcher } from 'svelte';
 
-	import { updateQCFinding, deleteQCFinding, createQCFinding } from '$lib/apis/qc';
+	import {
+		updateQCFinding,
+		deleteQCFinding,
+		createQCFinding,
+		createSuppressionRuleFromFinding
+	} from '$lib/apis/qc';
 	import SeverityBadge from '../SeverityBadge.svelte';
 	import FindingCard from './FindingCard.svelte';
+	import BulkActionsBar from './BulkActionsBar.svelte';
 
 	const i18n = getContext('i18n');
 	const dispatch = createEventDispatcher();
@@ -19,7 +25,40 @@
 	let severityFilter = '';
 	let statusFilter = '';
 	let sourceFilter = '';
+	let revisionFilter = '';
+	let duplicateFilter: 'hide' | 'only' | 'show' = 'show';
 	let showAddFinding = false;
+
+	let selectedIds: Set<string> = new Set();
+
+	const toggleSelect = (id: string, selected: boolean) => {
+		const next = new Set(selectedIds);
+		if (selected) next.add(id);
+		else next.delete(id);
+		selectedIds = next;
+	};
+
+	const clearSelection = () => {
+		selectedIds = new Set();
+	};
+
+	const handleBulkDone = () => {
+		clearSelection();
+		dispatch('refresh');
+	};
+
+	const handleCreateRule = async (finding: any) => {
+		try {
+			await createSuppressionRuleFromFinding(localStorage.token, jobId, finding.id, {
+				scope: 'template',
+				match_type: 'title_contains',
+				match_value: finding.title
+			});
+			toast.success($i18n.t('Suppression rule created'));
+		} catch (e) {
+			toast.error(`${e}`);
+		}
+	};
 
 	// Auto-open add form when an annotation is drawn
 	$: if (pendingAnnotation) { showAddFinding = true; }
@@ -30,6 +69,8 @@
 	let newSeverity = 'minor';
 
 	$: hasCrossRefFindings = findings.some((f) => f.source === 'cross_reference');
+	$: hasRevisionState = findings.some((f) => f.revision_state);
+	$: hasDuplicates = findings.some((f) => f.canonical_finding_id);
 
 	$: filteredFindings = findings.filter((f) => {
 		if (severityFilter && f.severity !== severityFilter) return false;
@@ -38,6 +79,9 @@
 			if (sourceFilter === 'cross_reference' && f.source !== 'cross_reference') return false;
 			if (sourceFilter === 'per_page' && f.source === 'cross_reference') return false;
 		}
+		if (revisionFilter && f.revision_state !== revisionFilter) return false;
+		if (duplicateFilter === 'hide' && f.canonical_finding_id) return false;
+		if (duplicateFilter === 'only' && !f.canonical_finding_id) return false;
 		return true;
 	});
 
@@ -155,8 +199,36 @@
 					<option value="cross_reference">{$i18n.t('Cross-Ref')}</option>
 				</select>
 			{/if}
+			{#if hasRevisionState}
+				<select
+					bind:value={revisionFilter}
+					class="flex-1 text-xs rounded-lg border border-gray-200 dark:border-gray-800 bg-transparent px-2 py-1 outline-none"
+				>
+					<option value="">{$i18n.t('All Revisions')}</option>
+					<option value="new">{$i18n.t('New')}</option>
+					<option value="carried_over">{$i18n.t('Carried Over')}</option>
+					<option value="resolved">{$i18n.t('Resolved')}</option>
+				</select>
+			{/if}
+			{#if hasDuplicates}
+				<select
+					bind:value={duplicateFilter}
+					class="flex-1 text-xs rounded-lg border border-gray-200 dark:border-gray-800 bg-transparent px-2 py-1 outline-none"
+				>
+					<option value="show">{$i18n.t('Show dups')}</option>
+					<option value="hide">{$i18n.t('Hide dups')}</option>
+					<option value="only">{$i18n.t('Only dups')}</option>
+				</select>
+			{/if}
 		</div>
 	</div>
+
+	<BulkActionsBar
+		{jobId}
+		{selectedIds}
+		on:done={handleBulkDone}
+		on:clear={clearSelection}
+	/>
 
 	<!-- Add Finding Form -->
 	{#if showAddFinding}
@@ -222,11 +294,16 @@
 					<FindingCard
 						{finding}
 						highlighted={finding.id === highlightedFindingId}
+						selectable
+						selected={selectedIds.has(finding.id)}
+						on:toggleSelect={(e) => toggleSelect(finding.id, e.detail)}
 						on:navigate={() => dispatch('navigate', finding)}
 						on:navigateRef={(e) => dispatch('navigateRef', e.detail)}
 						on:statusChange={(e) => handleStatusChange(finding.id, e.detail)}
 						on:delete={() => handleDelete(finding.id)}
 						on:highlight={(e) => dispatch('highlight', e.detail)}
+						on:editLocation={() => dispatch('editLocation', finding)}
+						on:createRule={() => handleCreateRule(finding)}
 					/>
 				{/each}
 			</div>

@@ -10,13 +10,20 @@
 		runQCJob,
 		addQCJobDocument,
 		exportQCJob,
-		selfImproveQCTemplate
+		selfImproveQCTemplate,
+		createQCReport,
+		getQCReport,
+		downloadQCReport,
+		createQCJobRevision
 	} from '$lib/apis/qc';
 
 	import DocumentViewer from './DocumentViewer.svelte';
 	import FindingsPanel from './FindingsPanel.svelte';
 	import JobStatusBadge from '../JobStatusBadge.svelte';
 	import SelfImproveDialog from './SelfImproveDialog.svelte';
+	import DuplicatesDialog from './DuplicatesDialog.svelte';
+	import LocationEditor from './LocationEditor.svelte';
+	import SuppressionEventList from '../suppression/SuppressionEventList.svelte';
 	import Spinner from '$lib/components/common/Spinner.svelte';
 
 	const i18n = getContext('i18n');
@@ -43,6 +50,19 @@
 	let selfImproveLoading = false;
 	let selfImproveSuggestions: any = null;
 	let showSelfImproveDialog = false;
+
+	// Report state
+	let reportGenerating = false;
+	let exportMenuOpen = false;
+
+	// Finding intel state
+	let showDuplicatesDialog = false;
+	let showLocationEditor = false;
+	let editingFinding: any = null;
+	let activeTab: 'findings' | 'suppressed' = 'findings';
+
+	$: duplicateCount = findings.filter((f) => f.canonical_finding_id).length;
+	$: suppressedCount = job?.meta?.statistics?.suppressed_count || 0;
 
 	// Annotation state
 	let annotationMode = false;
@@ -195,6 +215,92 @@
 		highlightedFindingId = e.detail.findingId;
 	};
 
+	const pollReport = async (reportId: string, filenameBase: string): Promise<void> => {
+		const start = Date.now();
+		const timeoutMs = 120000;
+		while (Date.now() - start < timeoutMs) {
+			await new Promise((r) => setTimeout(r, 2000));
+			const rep = await getQCReport(localStorage.token, jobId, reportId);
+			if (!rep) continue;
+			if (rep.status === 'ready') {
+				await downloadQCReport(localStorage.token, jobId, reportId, `${filenameBase}.pdf`);
+				return;
+			}
+			if (rep.status === 'failed') {
+				const err = (rep.meta && rep.meta.error) || $i18n.t('Report generation failed');
+				throw err;
+			}
+		}
+		throw $i18n.t('Report generation timed out');
+	};
+
+	const handleGenerateBrandedPdf = async () => {
+		exportMenuOpen = false;
+		reportGenerating = true;
+		try {
+			const rep = await createQCReport(localStorage.token, jobId, {
+				report_type: 'branded_pdf',
+				options: { include_severities: ['critical', 'major', 'minor', 'info'] }
+			});
+			if (!rep) throw $i18n.t('Failed to queue report');
+			toast.info($i18n.t('Generating branded PDF...'));
+			await pollReport(rep.id, `qc_report_${jobId}`);
+			toast.success($i18n.t('Branded PDF downloaded'));
+		} catch (e) {
+			toast.error(`${e}`);
+		}
+		reportGenerating = false;
+	};
+
+	const handleGenerateRedlinedPdf = async (docId: string) => {
+		exportMenuOpen = false;
+		reportGenerating = true;
+		try {
+			const rep = await createQCReport(localStorage.token, jobId, {
+				report_type: 'redlined_pdf',
+				options: { document_id: docId }
+			});
+			if (!rep) throw $i18n.t('Failed to queue report');
+			toast.info($i18n.t('Generating redlined PDF...'));
+			const doc = documents.find((d) => d.id === docId);
+			const base = ((doc?.meta?.name as string) || `document_${docId}`).replace(/\.[^.]+$/, '');
+			await pollReport(rep.id, `${base}_redlined`);
+			toast.success($i18n.t('Redlined PDF downloaded'));
+		} catch (e) {
+			toast.error(`${e}`);
+		}
+		reportGenerating = false;
+	};
+
+	const handleCreateRevision = async () => {
+		try {
+			const created = await createQCJobRevision(localStorage.token, jobId, {});
+			if (created) {
+				toast.success($i18n.t('Revision created'));
+				goto(`/qc/jobs/${created.id}`);
+			}
+		} catch (e) {
+			toast.error(`${e}`);
+		}
+	};
+
+	const handleCompareToPrev = () => {
+		if (job?.previous_job_id) {
+			goto(`/qc/jobs/${job.previous_job_id}/diff/${jobId}`);
+		}
+	};
+
+	const openLocationEditor = (f: any) => {
+		editingFinding = f;
+		showLocationEditor = true;
+		// Scroll the main viewer to the right page/doc so drawing is possible.
+		if (f?.document_id) {
+			const idx = documents.findIndex((d) => d.id === f.document_id);
+			if (idx !== -1) selectedDocIndex = idx;
+		}
+		if (f?.page_number) selectedPage = f.page_number;
+	};
+
 	onMount(async () => {
 		await loadJob();
 		loading = false;
@@ -243,6 +349,19 @@
 			</button>
 			<h2 class="font-medium text-sm truncate">{job.name}</h2>
 			<JobStatusBadge status={job.status} result={job.overall_result} />
+			{#if job.revision_index !== null && job.revision_index !== undefined}
+				<span class="px-2 py-0.5 text-[11px] rounded-full bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300 shrink-0">
+					Rev {job.revision_index}{job.revision_label ? ` · ${job.revision_label}` : ''}
+				</span>
+			{/if}
+			{#if job.project_id}
+				<a
+					href={`/qc/projects/${job.project_id}`}
+					class="text-[11px] text-blue-600 dark:text-blue-400 hover:underline shrink-0"
+				>
+					{$i18n.t('Project')}
+				</a>
+			{/if}
 		</div>
 
 		<div class="flex items-center gap-2 shrink-0">
@@ -319,18 +438,81 @@
 						</button>
 					{/if}
 
+					{#if job.previous_job_id}
+						<button
+							class="px-3 py-1 text-xs rounded-lg border border-gray-200 dark:border-gray-700 hover:bg-gray-100 dark:hover:bg-gray-800 transition"
+							on:click={handleCompareToPrev}
+						>
+							{$i18n.t('Compare to prev')}
+						</button>
+					{/if}
+
+					{#if duplicateCount > 0}
+						<button
+							class="px-3 py-1 text-xs rounded-lg border border-amber-300 dark:border-amber-700 text-amber-700 dark:text-amber-400 hover:bg-amber-50 dark:hover:bg-amber-900/20 transition"
+							on:click={() => (showDuplicatesDialog = true)}
+						>
+							{$i18n.t('Duplicates')} ({duplicateCount})
+						</button>
+					{/if}
+
 					<button
 						class="px-3 py-1 text-xs rounded-lg border border-gray-200 dark:border-gray-700 hover:bg-gray-100 dark:hover:bg-gray-800 transition"
-						on:click={() => handleExport('csv')}
+						on:click={handleCreateRevision}
 					>
-						{$i18n.t('Export CSV')}
+						+ {$i18n.t('New revision')}
 					</button>
-					<button
-						class="px-3 py-1 text-xs rounded-lg border border-gray-200 dark:border-gray-700 hover:bg-gray-100 dark:hover:bg-gray-800 transition"
-						on:click={() => handleExport('json')}
-					>
-						{$i18n.t('Export JSON')}
-					</button>
+
+					<div class="relative">
+						<button
+							class="px-3 py-1 text-xs rounded-lg border border-gray-200 dark:border-gray-700 hover:bg-gray-100 dark:hover:bg-gray-800 transition flex items-center gap-1 disabled:opacity-50"
+							disabled={reportGenerating}
+							on:click={() => (exportMenuOpen = !exportMenuOpen)}
+						>
+							{#if reportGenerating}<Spinner className="size-3" />{/if}
+							{$i18n.t('Export')} ▾
+						</button>
+						{#if exportMenuOpen}
+							<div
+								class="absolute right-0 mt-1 w-52 rounded-xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 shadow-lg z-20 py-1"
+							>
+								<button
+									class="w-full text-left px-3 py-1.5 text-xs hover:bg-gray-100 dark:hover:bg-gray-800"
+									on:click={() => {
+										exportMenuOpen = false;
+										handleExport('csv');
+									}}
+								>
+									{$i18n.t('Export CSV')}
+								</button>
+								<button
+									class="w-full text-left px-3 py-1.5 text-xs hover:bg-gray-100 dark:hover:bg-gray-800"
+									on:click={() => {
+										exportMenuOpen = false;
+										handleExport('json');
+									}}
+								>
+									{$i18n.t('Export JSON')}
+								</button>
+								<div class="border-t border-gray-100 dark:border-gray-800 my-1" />
+								<button
+									class="w-full text-left px-3 py-1.5 text-xs hover:bg-gray-100 dark:hover:bg-gray-800"
+									on:click={handleGenerateBrandedPdf}
+								>
+									{$i18n.t('Branded PDF')}
+								</button>
+								{#each documents as doc}
+									<button
+										class="w-full text-left px-3 py-1.5 text-xs hover:bg-gray-100 dark:hover:bg-gray-800 truncate"
+										on:click={() => handleGenerateRedlinedPdf(doc.id)}
+										title={$i18n.t('Redlined PDF for this document')}
+									>
+										{$i18n.t('Redlined PDF')}: {(doc.meta?.name || 'document').toString().slice(0, 24)}
+									</button>
+								{/each}
+							</div>
+						{/if}
+					</div>
 				{/if}
 			{/if}
 		</div>
@@ -406,20 +588,41 @@
 			</div>
 
 			<!-- Findings Panel (30%) -->
-			<div class="w-[360px] shrink-0 border-l border-gray-200 dark:border-gray-800 overflow-hidden">
-				<FindingsPanel
-					{findings}
-					{jobId}
-					{selectedDoc}
-					{selectedPage}
-					{pendingAnnotation}
-					{highlightedFindingId}
-					on:navigate={(e) => navigateToFinding(e.detail)}
-					on:navigateRef={(e) => navigateToRef(e.detail)}
-					on:refresh={loadJob}
-					on:highlight={(e) => (highlightedFindingId = e.detail)}
-					on:annotationClear={() => (pendingAnnotation = null)}
-				/>
+			<div class="w-[360px] shrink-0 border-l border-gray-200 dark:border-gray-800 overflow-hidden flex flex-col">
+				<div class="flex border-b border-gray-200 dark:border-gray-800 text-xs">
+					<button
+						class="flex-1 px-3 py-2 transition {activeTab === 'findings' ? 'bg-gray-50 dark:bg-gray-850 font-medium' : 'text-gray-500 hover:bg-gray-50 dark:hover:bg-gray-850/50'}"
+						on:click={() => (activeTab = 'findings')}
+					>
+						{$i18n.t('Findings')}
+					</button>
+					<button
+						class="flex-1 px-3 py-2 transition {activeTab === 'suppressed' ? 'bg-gray-50 dark:bg-gray-850 font-medium' : 'text-gray-500 hover:bg-gray-50 dark:hover:bg-gray-850/50'}"
+						on:click={() => (activeTab = 'suppressed')}
+					>
+						{$i18n.t('Suppressed')}{suppressedCount > 0 ? ` (${suppressedCount})` : ''}
+					</button>
+				</div>
+				<div class="flex-1 overflow-hidden">
+					{#if activeTab === 'findings'}
+						<FindingsPanel
+							{findings}
+							{jobId}
+							{selectedDoc}
+							{selectedPage}
+							{pendingAnnotation}
+							{highlightedFindingId}
+							on:navigate={(e) => navigateToFinding(e.detail)}
+							on:navigateRef={(e) => navigateToRef(e.detail)}
+							on:refresh={loadJob}
+							on:highlight={(e) => (highlightedFindingId = e.detail)}
+							on:annotationClear={() => (pendingAnnotation = null)}
+							on:editLocation={(e) => openLocationEditor(e.detail)}
+						/>
+					{:else}
+						<SuppressionEventList {jobId} />
+					{/if}
+				</div>
 			</div>
 		</div>
 	{/if}
@@ -453,4 +656,15 @@
 <SelfImproveDialog
 	suggestions={selfImproveSuggestions}
 	bind:show={showSelfImproveDialog}
+/>
+
+<DuplicatesDialog {jobId} bind:show={showDuplicatesDialog} on:change={loadJob} />
+
+<LocationEditor
+	{jobId}
+	finding={editingFinding}
+	bind:show={showLocationEditor}
+	{pendingAnnotation}
+	on:annotationClear={() => (pendingAnnotation = null)}
+	on:updated={loadJob}
 />

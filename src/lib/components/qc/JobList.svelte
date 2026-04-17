@@ -84,9 +84,14 @@
 			>
 				<div class="flex justify-between items-start">
 					<div class="flex-1 min-w-0">
-						<div class="flex items-center gap-2">
+						<div class="flex items-center gap-2 flex-wrap">
 							<h3 class="font-medium text-sm truncate">{job.name}</h3>
 							<JobStatusBadge status={job.status} result={job.overall_result} />
+							{#if job.revision_index !== null && job.revision_index !== undefined}
+								<span class="text-[10px] px-1.5 py-0.5 rounded-full bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-300">
+									Rev {job.revision_index}{job.revision_label ? ` · ${job.revision_label}` : ''}
+								</span>
+							{/if}
 						</div>
 						{#if job.model_id}
 							<p class="text-xs text-gray-500 dark:text-gray-400 mt-1">

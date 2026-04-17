@@ -291,6 +291,141 @@ def process_excel_for_qc(file_path: str) -> list[dict]:
     return sheets
 
 
+def ingest_file_as_document(
+    user_id: str,
+    uploaded_file,
+    *,
+    max_upload_bytes: int,
+    max_pdf_pages: int,
+    allowed_content_types: set[str],
+    allowed_extensions: tuple[str, ...],
+    extra_meta: Optional[dict] = None,
+) -> tuple[str, dict, int, int]:
+    """Read an UploadFile, store it, convert PDF pages to images, and return
+    `(file_id, page_images, page_count, size_bytes)`.
+
+    - `page_images` is a dict str(page_num) -> file_id of the rendered PNG.
+    - For single-image uploads, page 1 points to the file_id itself.
+    - For non-visual documents (xlsx/docx), page_count=0 and page_images={}.
+
+    Raises on validation issues the caller is expected to surface as HTTPException.
+    """
+    import uuid
+    from io import BytesIO
+
+    from open_webui.models.files import Files, FileForm
+    from open_webui.storage.provider import Storage
+
+    filename = uploaded_file.filename or "upload"
+    content_type = uploaded_file.content_type or ""
+    lowered = filename.lower()
+
+    ext_ok = any(lowered.endswith(ext) for ext in allowed_extensions)
+    type_ok = content_type in allowed_content_types or content_type.startswith("image/")
+    if not (ext_ok or type_ok):
+        raise ValueError(
+            "Unsupported file type. Allowed: "
+            + ", ".join(e.lstrip(".").upper() for e in allowed_extensions)
+        )
+
+    file_bytes = bytearray()
+    chunk_size = 1024 * 1024
+    while True:
+        chunk = uploaded_file.file.read(chunk_size)
+        if not chunk:
+            break
+        file_bytes.extend(chunk)
+        if len(file_bytes) > max_upload_bytes:
+            raise OverflowError(
+                f"File exceeds maximum upload size of {max_upload_bytes // (1024 * 1024)} MB."
+            )
+    file_bytes = bytes(file_bytes)
+
+    file_id = str(uuid.uuid4())
+    storage_filename = f"{file_id}_{filename}"
+
+    contents, file_path = Storage.upload_file(
+        BytesIO(file_bytes),
+        storage_filename,
+        {
+            "OpenWebUI-User-Id": user_id,
+            "OpenWebUI-File-Id": file_id,
+        },
+    )
+
+    meta = {
+        "name": filename,
+        "content_type": content_type,
+        "size": len(contents),
+    }
+    if extra_meta:
+        meta.update(extra_meta)
+
+    Files.insert_new_file(
+        user_id,
+        FileForm(
+            id=file_id,
+            filename=storage_filename,
+            path=file_path,
+            meta=meta,
+        ),
+    )
+
+    page_images: dict = {}
+    page_count = 0
+
+    if content_type == "application/pdf" or filename.lower().endswith(".pdf"):
+        actual_file_path = Storage.get_file(file_path)
+        pages = convert_pdf_to_pages(actual_file_path)
+        if len(pages) > max_pdf_pages:
+            raise OverflowError(
+                f"PDF has {len(pages)} pages; maximum is {max_pdf_pages}."
+            )
+
+        for i, page_bytes in enumerate(pages):
+            page_num = i + 1
+            page_file_id = str(uuid.uuid4())
+            page_filename = f"{page_file_id}_page_{page_num}.png"
+
+            _, page_file_path = Storage.upload_file(
+                BytesIO(page_bytes),
+                page_filename,
+                {
+                    "OpenWebUI-User-Id": user_id,
+                    "OpenWebUI-File-Id": page_file_id,
+                },
+            )
+
+            page_meta = {
+                "name": page_filename,
+                "content_type": "image/png",
+                "size": len(page_bytes),
+                "page_number": page_num,
+            }
+            if extra_meta:
+                page_meta.update(extra_meta)
+
+            Files.insert_new_file(
+                user_id,
+                FileForm(
+                    id=page_file_id,
+                    filename=page_filename,
+                    path=page_file_path,
+                    meta=page_meta,
+                ),
+            )
+            page_images[str(page_num)] = page_file_id
+        page_count = len(pages)
+
+    elif content_type and content_type.startswith("image/"):
+        page_images["1"] = file_id
+        page_count = 1
+    else:
+        page_count = 0
+
+    return file_id, page_images, page_count, len(contents)
+
+
 def process_docx_for_qc(file_path: str) -> str:
     """Extract text content from DOCX file."""
     try:

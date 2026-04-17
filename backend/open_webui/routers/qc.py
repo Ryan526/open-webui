@@ -36,6 +36,29 @@ from open_webui.models.qc import (
     QCComments,
     QCCommentModel,
     QCCommentForm,
+    QCProjects,
+    QCProjectModel,
+    QCProjectForm,
+    QCReports,
+    QCReportModel,
+    QCReportForm,
+    QCSuppressionRules,
+    QCSuppressionRuleModel,
+    QCSuppressionRuleForm,
+    QCSuppressionEvents,
+    QCSuppressionEventModel,
+    QCTemplateVersions,
+    QCTemplateVersionModel,
+    QCTestSets,
+    QCTestSetModel,
+    QCTestSetForm,
+    QCTestSetDocuments,
+    QCTestSetDocumentModel,
+    QCTestSetExpectedFindings,
+    QCTestSetExpectedFindingModel,
+    QCTestSetExpectedFindingForm,
+    QCTestRuns,
+    QCTestRunModel,
 )
 from open_webui.models.files import Files, FileForm
 from open_webui.models.knowledge import Knowledges
@@ -44,7 +67,8 @@ from open_webui.storage.provider import Storage
 
 from open_webui.utils.auth import get_verified_user
 from open_webui.utils.access_control import has_permission
-from open_webui.internal.db import get_session
+from open_webui.internal.db import get_session, get_db_context
+from open_webui.models.qc import QCTemplate
 from open_webui.constants import ERROR_MESSAGES
 from open_webui.config import QC_MAX_UPLOAD_BYTES, QC_MAX_PDF_PAGES
 
@@ -180,6 +204,94 @@ def _check_template_access(template, user, write=False):
     )
 
 
+def _check_project_access(project, user, write=False):
+    """Check if user can access a project."""
+    if not project:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+    if user.role == "admin":
+        return
+    if project.user_id == user.id:
+        return
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
+    )
+
+
+############################
+# Project Endpoints
+############################
+
+
+@router.get("/projects", response_model=list[QCProjectModel])
+async def get_projects(
+    request: Request,
+    user=Depends(get_verified_user),
+):
+    _check_qc_access(request, user)
+    if user.role == "admin":
+        return QCProjects.get_projects()
+    return QCProjects.get_projects(user_id=user.id)
+
+
+@router.post("/projects", response_model=Optional[QCProjectModel])
+async def create_project(
+    request: Request,
+    form_data: QCProjectForm,
+    user=Depends(get_verified_user),
+):
+    _check_qc_access(request, user)
+    project = QCProjects.insert_new_project(user.id, form_data)
+    if not project:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Failed to create project",
+        )
+    return project
+
+
+@router.get("/projects/{id}")
+async def get_project_by_id(
+    id: str,
+    request: Request,
+    user=Depends(get_verified_user),
+):
+    _check_qc_access(request, user)
+    project = QCProjects.get_project_by_id(id)
+    _check_project_access(project, user)
+    jobs = QCProjects.get_jobs_by_project_id(id)
+    return {**project.model_dump(), "jobs": [j.model_dump() for j in jobs]}
+
+
+@router.post("/projects/{id}", response_model=Optional[QCProjectModel])
+async def update_project(
+    id: str,
+    request: Request,
+    form_data: QCProjectForm,
+    user=Depends(get_verified_user),
+):
+    _check_qc_access(request, user)
+    project = QCProjects.get_project_by_id(id)
+    _check_project_access(project, user, write=True)
+    return QCProjects.update_project_by_id(id, form_data)
+
+
+@router.delete("/projects/{id}")
+async def delete_project(
+    id: str,
+    request: Request,
+    user=Depends(get_verified_user),
+):
+    _check_qc_access(request, user)
+    project = QCProjects.get_project_by_id(id)
+    _check_project_access(project, user, write=True)
+    QCProjects.delete_project_by_id(id)
+    return {"status": True}
+
+
 ############################
 # Template Endpoints
 ############################
@@ -275,12 +387,21 @@ async def update_template(
     id: str,
     request: Request,
     form_data: QCTemplateForm,
+    change_source: Optional[str] = Query(None),
+    change_summary: Optional[str] = Query(None),
     user=Depends(get_verified_user),
 ):
     _check_qc_access(request, user)
     template = QCTemplates.get_template_by_id(id)
     _check_template_access(template, user, write=True)
-    updated = QCTemplates.update_template_by_id(id, form_data)
+    source = change_source if change_source in ("manual", "self_improve", "restore") else "manual"
+    updated = QCTemplates.update_template_by_id(
+        id,
+        form_data,
+        change_source=source,
+        change_summary=change_summary,
+        actor_user_id=user.id,
+    )
     return updated
 
 
@@ -356,16 +477,36 @@ async def create_job(
 ):
     _check_qc_access(request, user)
 
-    # If template_id provided, snapshot template settings
+    # If template_id provided, snapshot template settings (optionally from a pinned version)
     if form_data.template_id:
         template = QCTemplates.get_template_by_id(form_data.template_id)
         if template:
+            # Resolve version to use: explicit pin > template's current_version_id
+            pinned_version = None
+            pin_version_id = form_data.template_version_id or template.current_version_id
+            if pin_version_id:
+                pinned_version = QCTemplateVersions.get_version_by_id(pin_version_id)
+                if pinned_version and pinned_version.template_id != template.id:
+                    pinned_version = None
+
+            source_system_prompt = (
+                pinned_version.system_prompt if pinned_version else template.system_prompt
+            )
+            source_model_id = (
+                pinned_version.model_id if pinned_version else template.model_id
+            )
+            source_meta = (pinned_version.meta if pinned_version else template.meta) or {}
+
             if not form_data.model_id:
-                form_data.model_id = template.model_id
+                form_data.model_id = source_model_id
             if not form_data.system_prompt:
-                form_data.system_prompt = template.system_prompt
-            # Snapshot checklist into job meta
-            template_meta = template.meta or {}
+                form_data.system_prompt = source_system_prompt
+
+            # Always persist the pinned version id on the job (if any resolvable)
+            if pinned_version and not form_data.template_version_id:
+                form_data.template_version_id = pinned_version.id
+
+            template_meta = source_meta
             job_meta = form_data.meta or {}
             job_meta["checklist_snapshot"] = template_meta.get("checklist", [])
             knowledge_base_ids = template_meta.get("knowledge_base_ids", [])
@@ -1065,3 +1206,1317 @@ async def get_checklist_status(
         )
 
     return checklist_status
+
+
+############################
+# Revision Endpoints
+############################
+
+
+@router.post("/jobs/{id}/create-revision", response_model=Optional[QCJobModel])
+async def create_revision(
+    id: str,
+    request: Request,
+    form_data: Optional[dict] = None,
+    user=Depends(get_verified_user),
+):
+    """Create a shell follow-up job that references the given job as its previous revision.
+
+    The new job inherits the template, model, system_prompt, and (transitively) the
+    KB context of the source job. Documents are NOT copied — the client re-uploads
+    through the standard documents/add endpoint.
+    """
+    _check_qc_access(request, user)
+    prev_job = QCJobs.get_job_by_id(id)
+    _check_job_access(prev_job, user, write=True)
+
+    body = form_data or {}
+    revision_label = body.get("revision_label") or None
+    name = body.get("name") or f"{prev_job.name} (Rev {(prev_job.revision_index or 0) + 1})"
+
+    new_meta: dict = {}
+    # Carry KB/checklist snapshots forward so analysis works without needing template re-resolve.
+    prev_meta = prev_job.meta or {}
+    for key in (
+        "checklist_snapshot",
+        "knowledge_base_ids",
+        "cross_reference_analysis",
+        "kb_context",
+        "kb_truncated",
+        "kb_original_chars",
+        "kb_used_chars",
+        "branding",
+    ):
+        if key in prev_meta:
+            new_meta[key] = prev_meta[key]
+
+    new_form = QCJobForm(
+        name=name,
+        template_id=prev_job.template_id,
+        model_id=prev_job.model_id,
+        system_prompt=prev_job.system_prompt,
+        project_id=prev_job.project_id,
+        previous_job_id=prev_job.id,
+        revision_label=revision_label,
+        meta=new_meta,
+    )
+    created = QCJobs.insert_new_job(user.id, new_form)
+    if not created:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Failed to create revision",
+        )
+    return created
+
+
+@router.get("/jobs/{id}/diff/{other_id}")
+async def get_job_diff(
+    id: str,
+    other_id: str,
+    request: Request,
+    user=Depends(get_verified_user),
+):
+    """Compute the revision diff between two jobs (id = previous, other_id = new)."""
+    _check_qc_access(request, user)
+    prev = QCJobs.get_job_by_id(id)
+    _check_job_access(prev, user)
+    new = QCJobs.get_job_by_id(other_id)
+    _check_job_access(new, user)
+
+    from open_webui.utils.qc_revisions import compute_diff
+
+    return compute_diff(prev.id, new.id)
+
+
+@router.post("/jobs/{id}/diff/{other_id}/apply")
+async def apply_job_diff(
+    id: str,
+    other_id: str,
+    request: Request,
+    form_data: Optional[dict] = None,
+    user=Depends(get_verified_user),
+):
+    """Persist revision_state / previous_finding_id on the new job's findings.
+
+    Body (optional): {"create_resolved_ghosts": bool}
+    """
+    _check_qc_access(request, user)
+    prev = QCJobs.get_job_by_id(id)
+    _check_job_access(prev, user)
+    new = QCJobs.get_job_by_id(other_id)
+    _check_job_access(new, user, write=True)
+
+    body = form_data or {}
+    ghosts = bool(body.get("create_resolved_ghosts", False))
+
+    from open_webui.utils.qc_revisions import apply_diff_to_new_job
+
+    return apply_diff_to_new_job(prev.id, new.id, create_resolved_ghosts=ghosts)
+
+
+############################
+# Report Endpoints
+############################
+
+
+def _generate_report_background(
+    report_id: str,
+    job_id: str,
+    user_id: str,
+    report_type: str,
+    options: dict,
+):
+    """Background task: generate the report file and update status."""
+    try:
+        QCReports.update_report(report_id, status="generating")
+
+        job = QCJobs.get_job_by_id(job_id)
+        documents = QCJobDocuments.get_documents_by_job_id(job_id)
+        findings = QCFindings.get_findings_by_job_id(job_id)
+
+        from open_webui.utils.qc_report import (
+            generate_branded_pdf,
+            generate_redlined_pdf,
+            persist_report_bytes,
+            _resolve_branding,
+        )
+
+        if report_type == "branded_pdf":
+            template_meta = None
+            if job and job.template_id:
+                tpl = QCTemplates.get_template_by_id(job.template_id)
+                template_meta = tpl.meta if tpl else None
+            branding = _resolve_branding(job.meta if job else None, template_meta)
+
+            include_severities = options.get("include_severities")
+            include_dismissed = bool(options.get("include_dismissed", False))
+            pdf_bytes, meta = generate_branded_pdf(
+                job,
+                documents,
+                findings,
+                branding=branding,
+                include_severities=include_severities,
+                include_dismissed=include_dismissed,
+            )
+            filename = f"qc_report_{job_id}.pdf"
+            file_id = persist_report_bytes(user_id, job_id, filename, pdf_bytes, "application/pdf")
+            QCReports.update_report(
+                report_id, status="ready", file_id=file_id, meta=meta
+            )
+
+        elif report_type == "redlined_pdf":
+            doc_id = options.get("document_id")
+            if not doc_id:
+                raise RuntimeError("document_id required for redlined_pdf")
+            target_doc = next((d for d in documents if d.id == doc_id), None)
+            if target_doc is None:
+                raise RuntimeError("document not found")
+            doc_findings = [f for f in findings if f.document_id == doc_id]
+            pdf_bytes, meta = generate_redlined_pdf(job, target_doc, doc_findings)
+            doc_meta = target_doc.meta or {}
+            base_name = (doc_meta.get("name") or f"document_{doc_id}").rsplit(".", 1)[0]
+            filename = f"{base_name}_redlined.pdf"
+            file_id = persist_report_bytes(user_id, job_id, filename, pdf_bytes, "application/pdf")
+            QCReports.update_report(
+                report_id, status="ready", file_id=file_id, meta=meta
+            )
+        else:
+            raise RuntimeError(f"Unsupported report_type: {report_type}")
+
+    except Exception as e:
+        log.exception(f"Report generation failed for report_id={report_id}")
+        QCReports.update_report(
+            report_id,
+            status="failed",
+            meta={"error": str(e)},
+        )
+
+
+@router.post("/jobs/{id}/reports", response_model=Optional[QCReportModel])
+async def create_report(
+    id: str,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    form_data: dict,
+    user=Depends(get_verified_user),
+):
+    """Create a report generation task. Runs asynchronously; poll via GET reports/{id}."""
+    _check_qc_access(request, user)
+    job = QCJobs.get_job_by_id(id)
+    _check_job_access(job, user)
+
+    report_type = form_data.get("report_type")
+    if report_type not in ("branded_pdf", "redlined_pdf", "json", "csv"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid report_type",
+        )
+
+    options = form_data.get("options") or {}
+
+    report = QCReports.insert_report(
+        user.id,
+        id,
+        QCReportForm(report_type=report_type, meta={"options": options}),
+    )
+    if not report:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Failed to create report",
+        )
+
+    if report_type in ("branded_pdf", "redlined_pdf"):
+        background_tasks.add_task(
+            _generate_report_background,
+            report.id,
+            id,
+            user.id,
+            report_type,
+            options,
+        )
+    else:
+        # json/csv can still be served by the existing /export endpoint; mark as ready
+        # with no file_id — clients should prefer /export for those formats.
+        QCReports.update_report(
+            report.id,
+            status="ready",
+            meta={"note": "use /jobs/{id}/export for json/csv formats"},
+        )
+
+    return QCReports.get_report_by_id(report.id)
+
+
+@router.get("/jobs/{id}/reports", response_model=list[QCReportModel])
+async def list_reports(
+    id: str,
+    request: Request,
+    user=Depends(get_verified_user),
+):
+    _check_qc_access(request, user)
+    job = QCJobs.get_job_by_id(id)
+    _check_job_access(job, user)
+    return QCReports.get_reports_by_job_id(id)
+
+
+@router.get("/jobs/{id}/reports/{report_id}", response_model=Optional[QCReportModel])
+async def get_report(
+    id: str,
+    report_id: str,
+    request: Request,
+    user=Depends(get_verified_user),
+):
+    _check_qc_access(request, user)
+    job = QCJobs.get_job_by_id(id)
+    _check_job_access(job, user)
+    report = QCReports.get_report_by_id(report_id)
+    if not report or report.job_id != id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Report not found",
+        )
+    return report
+
+
+@router.get("/jobs/{id}/reports/{report_id}/download")
+async def download_report(
+    id: str,
+    report_id: str,
+    request: Request,
+    user=Depends(get_verified_user),
+):
+    _check_qc_access(request, user)
+    job = QCJobs.get_job_by_id(id)
+    _check_job_access(job, user)
+    report = QCReports.get_report_by_id(report_id)
+    if not report or report.job_id != id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Report not found",
+        )
+    if report.status != "ready" or not report.file_id:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Report is {report.status}; not ready for download",
+        )
+    file_record = Files.get_file_by_id(report.file_id)
+    if not file_record:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Report file missing",
+        )
+    file_path = Storage.get_file(file_record.path)
+    with open(file_path, "rb") as f:
+        data = f.read()
+    download_name = (file_record.meta or {}).get("name") or file_record.filename or "report.pdf"
+    return StreamingResponse(
+        BytesIO(data),
+        media_type=(file_record.meta or {}).get("content_type", "application/pdf"),
+        headers={
+            "Content-Disposition": f'attachment; filename="{download_name}"'
+        },
+    )
+
+
+@router.delete("/jobs/{id}/reports/{report_id}")
+async def delete_report(
+    id: str,
+    report_id: str,
+    request: Request,
+    user=Depends(get_verified_user),
+):
+    _check_qc_access(request, user)
+    job = QCJobs.get_job_by_id(id)
+    _check_job_access(job, user, write=True)
+    report = QCReports.get_report_by_id(report_id)
+    if not report or report.job_id != id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Report not found",
+        )
+    QCReports.delete_report(report_id)
+    return {"status": True}
+
+
+############################
+# Bulk Finding Actions
+############################
+
+
+@router.post("/jobs/{job_id}/findings/bulk")
+async def bulk_update_findings(
+    job_id: str,
+    request: Request,
+    form_data: dict,
+    user=Depends(get_verified_user),
+):
+    """Apply an action to many findings at once.
+
+    Body:
+      {
+        "finding_ids": [str, ...],
+        "action": "confirm|dismiss|delete|severity|merge_duplicate|unlink_duplicate",
+        # action-specific extras:
+        "severity": "critical|major|minor|info",  # for severity
+        "dismissal_reason": str,                   # for dismiss
+        "canonical_finding_id": str,               # for merge_duplicate (optional override)
+      }
+    """
+    _check_qc_access(request, user)
+    job = QCJobs.get_job_by_id(job_id)
+    _check_job_access(job, user, write=True)
+
+    finding_ids = form_data.get("finding_ids") or []
+    action = form_data.get("action")
+    if not finding_ids or not action:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="finding_ids and action are required",
+        )
+
+    updated = 0
+    if action == "confirm":
+        updated = QCFindings.bulk_update_fields(job_id, finding_ids, {"status": "confirmed"})
+    elif action == "dismiss":
+        reason = form_data.get("dismissal_reason")
+        # For dismissal reason, update per-finding since meta merge is nuanced.
+        updated = 0
+        for fid in finding_ids:
+            finding = QCFindings.get_finding_by_id(fid)
+            if not finding or finding.job_id != job_id:
+                continue
+            update_form = QCFindingUpdateForm(
+                status="dismissed",
+                meta={**(finding.meta or {}), "dismissal_reason": reason} if reason else None,
+            )
+            QCFindings.update_finding(fid, update_form)
+            updated += 1
+    elif action == "severity":
+        sev = form_data.get("severity")
+        if sev not in ("critical", "major", "minor", "info"):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="severity must be one of critical/major/minor/info",
+            )
+        updated = QCFindings.bulk_update_fields(job_id, finding_ids, {"severity": sev})
+    elif action == "delete":
+        updated = 0
+        for fid in finding_ids:
+            finding = QCFindings.get_finding_by_id(fid)
+            if finding and finding.job_id == job_id:
+                QCFindings.delete_finding(fid)
+                updated += 1
+    elif action == "merge_duplicate":
+        # All finding_ids become duplicates of canonical_finding_id.
+        canonical = form_data.get("canonical_finding_id")
+        if not canonical:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="canonical_finding_id required for merge_duplicate",
+            )
+        canon_row = QCFindings.get_finding_by_id(canonical)
+        if not canon_row or canon_row.job_id != job_id:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="canonical finding not found",
+            )
+        # Ensure canonical itself is not marked as duplicate
+        QCFindings.set_canonical(canonical, None)
+        target_ids = [fid for fid in finding_ids if fid != canonical]
+        updated = QCFindings.bulk_update_fields(
+            job_id, target_ids, {"canonical_finding_id": canonical}
+        )
+    elif action == "unlink_duplicate":
+        updated = QCFindings.bulk_update_fields(
+            job_id, finding_ids, {"canonical_finding_id": None}
+        )
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unknown action: {action}",
+        )
+
+    return {"status": True, "updated": updated, "action": action}
+
+
+############################
+# Finding Location Editing
+############################
+
+
+@router.post("/jobs/{job_id}/findings/{finding_id}/location")
+async def update_finding_location(
+    job_id: str,
+    finding_id: str,
+    request: Request,
+    form_data: dict,
+    user=Depends(get_verified_user),
+):
+    """Update a finding's location. Two modes:
+
+    - `{"location": {x, y, width, height}}` — set explicitly.
+    - `{"reference_text": "MT-415AB"}` — snap to actual text position via find_text_on_page.
+    """
+    _check_qc_access(request, user)
+    job = QCJobs.get_job_by_id(job_id)
+    _check_job_access(job, user, write=True)
+
+    finding = QCFindings.get_finding_by_id(finding_id)
+    if not finding or finding.job_id != job_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Finding not found",
+        )
+
+    new_location = form_data.get("location")
+    ref_text = form_data.get("reference_text")
+    source = "manual"
+
+    if ref_text and finding.document_id and finding.page_number:
+        try:
+            from open_webui.utils.qc_document import find_text_on_page
+
+            doc = QCJobDocuments.get_document_by_id(finding.document_id)
+            if doc:
+                file_record = Files.get_file_by_id(doc.file_id)
+                if file_record:
+                    pdf_path = Storage.get_file(file_record.path)
+                    matches = find_text_on_page(pdf_path, finding.page_number, ref_text)
+                    if matches:
+                        new_location = matches[0]
+                        source = "text_search"
+        except Exception as e:
+            log.warning(f"Text search for finding {finding_id} failed: {e}")
+
+    if new_location is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Either a valid `location` or matching `reference_text` is required",
+        )
+
+    updated_meta = {
+        **(finding.meta or {}),
+        "location_source": source,
+    }
+    if ref_text:
+        updated_meta["reference_text"] = ref_text
+
+    updated = QCFindings.update_finding(
+        finding_id,
+        QCFindingUpdateForm(location=new_location, meta=updated_meta),
+    )
+    return updated
+
+
+############################
+# Duplicate Management
+############################
+
+
+@router.get("/jobs/{job_id}/duplicates")
+async def get_job_duplicates(
+    job_id: str,
+    request: Request,
+    user=Depends(get_verified_user),
+):
+    """Return duplicate clusters for this job."""
+    _check_qc_access(request, user)
+    job = QCJobs.get_job_by_id(job_id)
+    _check_job_access(job, user)
+
+    findings = QCFindings.get_findings_by_job_id(job_id)
+    clusters: dict[str, dict] = {}
+    # Index canonical findings
+    by_id = {f.id: f for f in findings}
+    for f in findings:
+        if f.canonical_finding_id:
+            canonical = by_id.get(f.canonical_finding_id)
+            if not canonical:
+                continue
+            c = clusters.setdefault(
+                canonical.id,
+                {
+                    "canonical": canonical.model_dump(),
+                    "duplicates": [],
+                },
+            )
+            c["duplicates"].append(f.model_dump())
+
+    # Remove singletons (shouldn't happen but be safe)
+    out = [v for v in clusters.values() if v["duplicates"]]
+    return {"clusters": out, "count": len(out)}
+
+
+@router.post("/jobs/{job_id}/duplicates/recompute")
+async def recompute_duplicates(
+    job_id: str,
+    request: Request,
+    user=Depends(get_verified_user),
+):
+    _check_qc_access(request, user)
+    job = QCJobs.get_job_by_id(job_id)
+    _check_job_access(job, user, write=True)
+
+    from open_webui.utils.qc_duplicates import find_and_link_duplicates
+
+    # Clear existing canonical links first so recompute is fresh
+    findings = QCFindings.get_findings_by_job_id(job_id)
+    linked_ids = [f.id for f in findings if f.canonical_finding_id]
+    if linked_ids:
+        QCFindings.bulk_update_fields(job_id, linked_ids, {"canonical_finding_id": None})
+
+    linked = find_and_link_duplicates(job_id)
+    return {"status": True, "duplicates_linked": linked}
+
+
+############################
+# Suppression Rules
+############################
+
+
+def _check_rule_access(rule, user, write=False):
+    if not rule:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+    if user.role == "admin":
+        return
+    if rule.user_id == user.id:
+        return
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
+    )
+
+
+@router.get("/suppression-rules", response_model=list[QCSuppressionRuleModel])
+async def list_suppression_rules(
+    request: Request,
+    scope: Optional[str] = Query(None),
+    template_id: Optional[str] = Query(None),
+    project_id: Optional[str] = Query(None),
+    user=Depends(get_verified_user),
+):
+    _check_qc_access(request, user)
+    if user.role == "admin":
+        return QCSuppressionRules.get_rules(
+            scope=scope, template_id=template_id, project_id=project_id
+        )
+    return QCSuppressionRules.get_rules(
+        user_id=user.id, scope=scope, template_id=template_id, project_id=project_id
+    )
+
+
+@router.post("/suppression-rules", response_model=Optional[QCSuppressionRuleModel])
+async def create_suppression_rule(
+    request: Request,
+    form_data: QCSuppressionRuleForm,
+    user=Depends(get_verified_user),
+):
+    _check_qc_access(request, user)
+    if form_data.scope not in ("template", "project", "global"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="scope must be one of template|project|global",
+        )
+    if form_data.match_type not in (
+        "title_exact",
+        "title_regex",
+        "title_contains",
+        "checklist_item",
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="invalid match_type",
+        )
+    return QCSuppressionRules.insert_rule(user.id, form_data)
+
+
+@router.post(
+    "/suppression-rules/{rule_id}", response_model=Optional[QCSuppressionRuleModel]
+)
+async def update_suppression_rule(
+    rule_id: str,
+    request: Request,
+    form_data: QCSuppressionRuleForm,
+    user=Depends(get_verified_user),
+):
+    _check_qc_access(request, user)
+    rule = QCSuppressionRules.get_rule_by_id(rule_id)
+    _check_rule_access(rule, user, write=True)
+    return QCSuppressionRules.update_rule(rule_id, form_data)
+
+
+@router.delete("/suppression-rules/{rule_id}")
+async def delete_suppression_rule(
+    rule_id: str,
+    request: Request,
+    user=Depends(get_verified_user),
+):
+    _check_qc_access(request, user)
+    rule = QCSuppressionRules.get_rule_by_id(rule_id)
+    _check_rule_access(rule, user, write=True)
+    QCSuppressionRules.delete_rule(rule_id)
+    return {"status": True}
+
+
+@router.get(
+    "/jobs/{job_id}/suppression-events",
+    response_model=list[QCSuppressionEventModel],
+)
+async def list_suppression_events(
+    job_id: str,
+    request: Request,
+    user=Depends(get_verified_user),
+):
+    _check_qc_access(request, user)
+    job = QCJobs.get_job_by_id(job_id)
+    _check_job_access(job, user)
+    return QCSuppressionEvents.get_events_by_job_id(job_id)
+
+
+@router.post(
+    "/jobs/{job_id}/findings/{finding_id}/create-suppression-rule",
+    response_model=Optional[QCSuppressionRuleModel],
+)
+async def create_rule_from_finding(
+    job_id: str,
+    finding_id: str,
+    request: Request,
+    form_data: Optional[dict] = None,
+    user=Depends(get_verified_user),
+):
+    """Convenience shortcut: create a title_contains rule from a dismissed finding.
+
+    Body (optional):
+      { "scope": "template|project|global" (default: "template"),
+        "match_type": "...", "match_value": "...", "name": "...", "reason": "..." }
+    """
+    _check_qc_access(request, user)
+    job = QCJobs.get_job_by_id(job_id)
+    _check_job_access(job, user, write=True)
+
+    finding = QCFindings.get_finding_by_id(finding_id)
+    if not finding or finding.job_id != job_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Finding not found",
+        )
+
+    body = form_data or {}
+    scope = body.get("scope", "template")
+    if scope not in ("template", "project", "global"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="scope must be one of template|project|global",
+        )
+    match_type = body.get("match_type", "title_contains")
+    match_value = body.get("match_value") or (finding.title or "")
+    if not match_value:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="match_value cannot be empty",
+        )
+    name = body.get("name") or f"Suppress: {(finding.title or '')[:60]}"
+    reason = body.get("reason") or (finding.meta or {}).get("dismissal_reason") or ""
+
+    rule_form = QCSuppressionRuleForm(
+        scope=scope,
+        template_id=job.template_id if scope == "template" else None,
+        project_id=job.project_id if scope == "project" else None,
+        name=name,
+        enabled=1,
+        match_type=match_type,
+        match_value=match_value,
+        reason=reason,
+        meta={"created_from_finding": finding_id, "job_id": job_id},
+    )
+    return QCSuppressionRules.insert_rule(user.id, rule_form)
+
+
+############################
+# Template Versioning
+############################
+
+
+@router.get(
+    "/templates/{id}/versions",
+    response_model=list[QCTemplateVersionModel],
+)
+async def list_template_versions(
+    id: str,
+    request: Request,
+    user=Depends(get_verified_user),
+):
+    _check_qc_access(request, user)
+    template = QCTemplates.get_template_by_id(id)
+    _check_template_access(template, user)
+    return QCTemplateVersions.get_versions_by_template_id(id)
+
+
+@router.get(
+    "/templates/{id}/versions/diff",
+)
+async def diff_template_versions(
+    id: str,
+    request: Request,
+    a: int = Query(...),
+    b: int = Query(...),
+    user=Depends(get_verified_user),
+):
+    """Return both versions' content — client diffs them."""
+    _check_qc_access(request, user)
+    template = QCTemplates.get_template_by_id(id)
+    _check_template_access(template, user)
+
+    va = QCTemplateVersions.get_version_by_number(id, a)
+    vb = QCTemplateVersions.get_version_by_number(id, b)
+    if not va or not vb:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="One or both versions not found",
+        )
+    return {"a": va.model_dump(), "b": vb.model_dump()}
+
+
+@router.get(
+    "/templates/{id}/versions/{version_number}",
+    response_model=Optional[QCTemplateVersionModel],
+)
+async def get_template_version(
+    id: str,
+    version_number: int,
+    request: Request,
+    user=Depends(get_verified_user),
+):
+    _check_qc_access(request, user)
+    template = QCTemplates.get_template_by_id(id)
+    _check_template_access(template, user)
+    version = QCTemplateVersions.get_version_by_number(id, version_number)
+    if not version:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Version not found",
+        )
+    return version
+
+
+@router.post(
+    "/templates/{id}/versions/{version_number}/restore",
+    response_model=Optional[QCTemplateModel],
+)
+async def restore_template_version(
+    id: str,
+    version_number: int,
+    request: Request,
+    user=Depends(get_verified_user),
+):
+    """Restore a prior version by creating a new version copying its content.
+
+    The new version's change_source is 'restore' and parent_version_id points
+    back to the version being restored. The template is updated in place to
+    match that content and current_version_id is pinned to the new version.
+    """
+    _check_qc_access(request, user)
+    template = QCTemplates.get_template_by_id(id)
+    _check_template_access(template, user, write=True)
+
+    old = QCTemplateVersions.get_version_by_number(id, version_number)
+    if not old:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Version not found",
+        )
+
+    restore_form = QCTemplateForm(
+        name=old.name or template.name,
+        description=old.description if old.description is not None else template.description,
+        system_prompt=old.system_prompt,
+        model_id=old.model_id,
+        meta=old.meta,
+    )
+
+    # Determine whether a new version will be created (only if content differs)
+    will_change = _would_create_new_version(template, restore_form)
+    if not will_change:
+        # Content already matches; nothing to do beyond pinning (already the current, since same content)
+        return template
+
+    # Force-create a version with change_source='restore' + parent pointing to the restored one
+    with get_db_context(None) as db:
+        new_version = QCTemplateVersions.create_version(
+            template_id=id,
+            user_id=user.id,
+            name=restore_form.name,
+            description=restore_form.description,
+            system_prompt=restore_form.system_prompt,
+            model_id=restore_form.model_id,
+            meta=restore_form.meta,
+            change_summary=f"Restored from v{old.version_number}",
+            change_source="restore",
+            parent_version_id=old.id,
+            db=db,
+        )
+        # Apply content to the template row and pin
+        db.query(QCTemplate).filter_by(id=id).update(
+            {
+                "name": restore_form.name,
+                "description": restore_form.description,
+                "system_prompt": restore_form.system_prompt,
+                "model_id": restore_form.model_id,
+                "meta": restore_form.meta,
+                "current_version_id": new_version.id if new_version else template.current_version_id,
+                "updated_at": int(time.time()),
+            }
+        )
+        db.commit()
+    return QCTemplates.get_template_by_id(id)
+
+
+def _would_create_new_version(template: QCTemplateModel, form: QCTemplateForm) -> bool:
+    from open_webui.models.qc import _content_fields_changed
+
+    return _content_fields_changed(template, form)
+
+
+############################
+# Test Harness
+############################
+
+
+def _check_test_set_access(test_set, user, write=False):
+    if not test_set:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+    if user.role == "admin":
+        return
+    if test_set.user_id == user.id:
+        return
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
+    )
+
+
+def _check_test_run_access(run, user):
+    if not run:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+    if user.role == "admin":
+        return
+    if run.user_id == user.id:
+        return
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
+    )
+
+
+@router.get("/test-sets", response_model=list[QCTestSetModel])
+async def list_test_sets(
+    request: Request,
+    user=Depends(get_verified_user),
+):
+    _check_qc_access(request, user)
+    if user.role == "admin":
+        return QCTestSets.get_test_sets()
+    return QCTestSets.get_test_sets(user_id=user.id)
+
+
+@router.post("/test-sets", response_model=Optional[QCTestSetModel])
+async def create_test_set(
+    request: Request,
+    form_data: QCTestSetForm,
+    user=Depends(get_verified_user),
+):
+    _check_qc_access(request, user)
+    return QCTestSets.insert_test_set(user.id, form_data)
+
+
+@router.get("/test-sets/{id}")
+async def get_test_set(
+    id: str,
+    request: Request,
+    user=Depends(get_verified_user),
+):
+    _check_qc_access(request, user)
+    ts = QCTestSets.get_test_set_by_id(id)
+    _check_test_set_access(ts, user)
+    docs = QCTestSetDocuments.get_documents_by_test_set_id(id)
+    expected = QCTestSetExpectedFindings.get_expected_by_test_set_id(id)
+    return {
+        **ts.model_dump(),
+        "documents": [d.model_dump() for d in docs],
+        "expected_findings": [e.model_dump() for e in expected],
+    }
+
+
+@router.post("/test-sets/{id}", response_model=Optional[QCTestSetModel])
+async def update_test_set(
+    id: str,
+    request: Request,
+    form_data: QCTestSetForm,
+    user=Depends(get_verified_user),
+):
+    _check_qc_access(request, user)
+    ts = QCTestSets.get_test_set_by_id(id)
+    _check_test_set_access(ts, user, write=True)
+    return QCTestSets.update_test_set(id, form_data)
+
+
+@router.delete("/test-sets/{id}")
+async def delete_test_set(
+    id: str,
+    request: Request,
+    user=Depends(get_verified_user),
+):
+    _check_qc_access(request, user)
+    ts = QCTestSets.get_test_set_by_id(id)
+    _check_test_set_access(ts, user, write=True)
+    QCTestSets.delete_test_set(id)
+    return {"status": True}
+
+
+@router.post("/test-sets/{id}/documents/add")
+async def add_test_set_document(
+    id: str,
+    request: Request,
+    file: UploadFile = File(...),
+    user=Depends(get_verified_user),
+):
+    _check_qc_access(request, user)
+    ts = QCTestSets.get_test_set_by_id(id)
+    _check_test_set_access(ts, user, write=True)
+
+    from open_webui.utils.qc_document import ingest_file_as_document
+
+    try:
+        file_id, page_images, page_count, _size = ingest_file_as_document(
+            user.id,
+            file,
+            max_upload_bytes=QC_MAX_UPLOAD_BYTES,
+            max_pdf_pages=QC_MAX_PDF_PAGES,
+            allowed_content_types=ALLOWED_UPLOAD_CONTENT_TYPES,
+            allowed_extensions=ALLOWED_UPLOAD_EXTENSIONS,
+            extra_meta={"qc_test_set_id": id},
+        )
+    except ValueError as ve:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(ve))
+    except OverflowError as oe:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=str(oe)
+        )
+
+    doc = QCTestSetDocuments.insert_document(
+        test_set_id=id,
+        file_id=file_id,
+        name=file.filename,
+        page_count=page_count,
+        meta={"page_images": page_images},
+    )
+    return doc
+
+
+@router.delete("/test-sets/{id}/documents/{doc_id}")
+async def remove_test_set_document(
+    id: str,
+    doc_id: str,
+    request: Request,
+    user=Depends(get_verified_user),
+):
+    _check_qc_access(request, user)
+    ts = QCTestSets.get_test_set_by_id(id)
+    _check_test_set_access(ts, user, write=True)
+    QCTestSetDocuments.delete_document(doc_id)
+    return {"status": True}
+
+
+@router.get(
+    "/test-sets/{id}/expected-findings",
+    response_model=list[QCTestSetExpectedFindingModel],
+)
+async def list_expected_findings(
+    id: str,
+    request: Request,
+    user=Depends(get_verified_user),
+):
+    _check_qc_access(request, user)
+    ts = QCTestSets.get_test_set_by_id(id)
+    _check_test_set_access(ts, user)
+    return QCTestSetExpectedFindings.get_expected_by_test_set_id(id)
+
+
+@router.post(
+    "/test-sets/{id}/expected-findings",
+    response_model=Optional[QCTestSetExpectedFindingModel],
+)
+async def create_expected_finding(
+    id: str,
+    request: Request,
+    form_data: QCTestSetExpectedFindingForm,
+    user=Depends(get_verified_user),
+):
+    _check_qc_access(request, user)
+    ts = QCTestSets.get_test_set_by_id(id)
+    _check_test_set_access(ts, user, write=True)
+    return QCTestSetExpectedFindings.insert_expected(id, form_data)
+
+
+@router.post(
+    "/test-sets/{id}/expected-findings/{ef_id}",
+    response_model=Optional[QCTestSetExpectedFindingModel],
+)
+async def update_expected_finding(
+    id: str,
+    ef_id: str,
+    request: Request,
+    form_data: QCTestSetExpectedFindingForm,
+    user=Depends(get_verified_user),
+):
+    _check_qc_access(request, user)
+    ts = QCTestSets.get_test_set_by_id(id)
+    _check_test_set_access(ts, user, write=True)
+    return QCTestSetExpectedFindings.update_expected(ef_id, form_data)
+
+
+@router.delete("/test-sets/{id}/expected-findings/{ef_id}")
+async def delete_expected_finding(
+    id: str,
+    ef_id: str,
+    request: Request,
+    user=Depends(get_verified_user),
+):
+    _check_qc_access(request, user)
+    ts = QCTestSets.get_test_set_by_id(id)
+    _check_test_set_access(ts, user, write=True)
+    QCTestSetExpectedFindings.delete_expected(ef_id)
+    return {"status": True}
+
+
+@router.post(
+    "/test-sets/{id}/seed-from-job/{job_id}",
+)
+async def seed_test_set_from_job(
+    id: str,
+    job_id: str,
+    request: Request,
+    user=Depends(get_verified_user),
+):
+    """Copy confirmed findings from a job into the test set as expected findings.
+
+    Only findings whose `document_id` maps to a `file_id` already present in this
+    test set are copied (matched via `qc_test_set_document.file_id`).
+    """
+    _check_qc_access(request, user)
+    ts = QCTestSets.get_test_set_by_id(id)
+    _check_test_set_access(ts, user, write=True)
+    job = QCJobs.get_job_by_id(job_id)
+    _check_job_access(job, user)
+
+    ts_docs = QCTestSetDocuments.get_documents_by_test_set_id(id)
+    # file_id -> test set document id
+    ts_doc_by_file_id = {d.file_id: d.id for d in ts_docs}
+
+    job_docs = QCJobDocuments.get_documents_by_job_id(job_id)
+    # job document id -> file_id
+    job_doc_file_ids = {d.id: d.file_id for d in job_docs}
+
+    findings = QCFindings.get_findings_by_job_id(job_id) or []
+    seeded = 0
+    for f in findings:
+        if f.status != "confirmed":
+            continue
+        file_id = job_doc_file_ids.get(f.document_id) if f.document_id else None
+        if not file_id:
+            continue
+        ts_doc_id = ts_doc_by_file_id.get(file_id)
+        if not ts_doc_id:
+            continue
+        form = QCTestSetExpectedFindingForm(
+            document_id=ts_doc_id,
+            page_number=f.page_number,
+            checklist_item_id=f.checklist_item_id,
+            severity=f.severity,
+            title=f.title,
+            description=f.description,
+            location=f.location if isinstance(f.location, dict) else None,
+            match_title_patterns=None,
+            seeded_from_finding_id=f.id,
+        )
+        QCTestSetExpectedFindings.insert_expected(id, form)
+        seeded += 1
+    return {"status": True, "seeded": seeded}
+
+
+@router.post("/test-sets/{id}/run", response_model=Optional[QCTestRunModel])
+async def run_test_set(
+    id: str,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    form_data: dict,
+    user=Depends(get_verified_user),
+):
+    """Run a test set against a template. Creates a shadow QC job that will trigger
+    metric computation when it finishes.
+    """
+    _check_qc_access(request, user)
+    ts = QCTestSets.get_test_set_by_id(id)
+    _check_test_set_access(ts, user)
+
+    template_id = form_data.get("template_id")
+    if not template_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="template_id required",
+        )
+    template = QCTemplates.get_template_by_id(template_id)
+    _check_template_access(template, user)
+
+    template_version_id = form_data.get("template_version_id") or template.current_version_id
+    pinned_version = None
+    if template_version_id:
+        pinned_version = QCTemplateVersions.get_version_by_id(template_version_id)
+        if pinned_version and pinned_version.template_id != template.id:
+            pinned_version = None
+
+    source_system_prompt = (
+        pinned_version.system_prompt if pinned_version else template.system_prompt
+    )
+    source_model_id = form_data.get("model_id_override") or (
+        pinned_version.model_id if pinned_version else template.model_id
+    )
+    source_meta = (pinned_version.meta if pinned_version else template.meta) or {}
+
+    if not source_model_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No model resolved for this template",
+        )
+
+    # Create the test run row first so we can point the shadow job at it.
+    test_run = QCTestRuns.insert_run(
+        user_id=user.id,
+        test_set_id=id,
+        template_id=template.id,
+        template_version_id=pinned_version.id if pinned_version else None,
+        meta={"model_id_override": form_data.get("model_id_override")},
+    )
+    if not test_run:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Failed to create test run",
+        )
+
+    # Build the shadow job meta (carry KB context similarly to create_job)
+    job_meta = {
+        "checklist_snapshot": source_meta.get("checklist", []),
+        "knowledge_base_ids": source_meta.get("knowledge_base_ids", []),
+        "is_test_run": True,
+        "test_run_id": test_run.id,
+    }
+    xref_config = source_meta.get("cross_reference_analysis")
+    if xref_config:
+        job_meta["cross_reference_analysis"] = xref_config
+
+    # Fetch KB context (same logic as create_job, abbreviated)
+    kb_ids = source_meta.get("knowledge_base_ids", [])
+    if kb_ids:
+        kb_parts = []
+        for kb_id in kb_ids:
+            try:
+                kb_files = Knowledges.get_files_by_id(kb_id)
+                for f in kb_files:
+                    file_content = (f.data or {}).get("content", "")
+                    if file_content:
+                        file_name = (f.meta or {}).get("name", f.filename)
+                        kb_parts.append(f"=== {file_name} ===\n{file_content}")
+            except Exception as e:
+                log.warning(f"Failed to fetch KB {kb_id} content: {e}")
+        kb_context = "\n\n".join(kb_parts)
+        max_kb_chars = 500_000
+        if len(kb_context) > max_kb_chars:
+            kb_context = kb_context[:max_kb_chars]
+            job_meta["kb_truncated"] = True
+        if kb_context:
+            job_meta["kb_context"] = kb_context
+
+    shadow_job = QCJobs.insert_new_job(
+        user.id,
+        QCJobForm(
+            name=f"[Test] {ts.name}",
+            template_id=template.id,
+            template_version_id=pinned_version.id if pinned_version else None,
+            model_id=source_model_id,
+            system_prompt=source_system_prompt,
+            test_run_id=test_run.id,
+            meta=job_meta,
+        ),
+    )
+    if not shadow_job:
+        QCTestRuns.update_run(test_run.id, status="failed", meta={"error": "Failed to create shadow job"})
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Failed to create shadow job",
+        )
+
+    # Copy test-set documents into qc_job_document (share same file_id + page_images).
+    ts_docs = QCTestSetDocuments.get_documents_by_test_set_id(id)
+    if not ts_docs:
+        QCTestRuns.update_run(test_run.id, status="failed", meta={"error": "Test set has no documents"})
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Test set has no documents",
+        )
+    for td in ts_docs:
+        job_doc = QCJobDocuments.insert_document(
+            shadow_job.id,
+            QCJobDocumentForm(file_id=td.file_id, document_type="subject"),
+        )
+        QCJobDocuments.update_document(
+            job_doc.id,
+            page_count=td.page_count,
+            status="pending",
+            meta={"page_images": (td.meta or {}).get("page_images", {})},
+        )
+
+    QCTestRuns.update_run(
+        test_run.id,
+        status="running",
+        shadow_job_id=shadow_job.id,
+    )
+
+    from open_webui.utils.qc_analysis import run_qc_job
+
+    background_tasks.add_task(run_qc_job, request, shadow_job.id, user)
+    QCJobs.update_job_status(shadow_job.id, "running")
+
+    return QCTestRuns.get_run_by_id(test_run.id)
+
+
+@router.get("/test-runs", response_model=list[QCTestRunModel])
+async def list_test_runs(
+    request: Request,
+    test_set_id: Optional[str] = Query(None),
+    user=Depends(get_verified_user),
+):
+    _check_qc_access(request, user)
+    if user.role == "admin":
+        return QCTestRuns.get_runs(test_set_id=test_set_id)
+    return QCTestRuns.get_runs(user_id=user.id, test_set_id=test_set_id)
+
+
+@router.get("/test-runs/{id}")
+async def get_test_run(
+    id: str,
+    request: Request,
+    user=Depends(get_verified_user),
+):
+    _check_qc_access(request, user)
+    run = QCTestRuns.get_run_by_id(id)
+    _check_test_run_access(run, user)
+    test_set = QCTestSets.get_test_set_by_id(run.test_set_id)
+    return {**run.model_dump(), "test_set": test_set.model_dump() if test_set else None}
