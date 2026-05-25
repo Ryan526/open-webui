@@ -67,7 +67,8 @@ from open_webui.storage.provider import Storage
 
 from open_webui.utils.auth import get_verified_user
 from open_webui.utils.access_control import has_permission
-from open_webui.internal.db import get_session, get_db_context
+from open_webui.internal.db import get_async_db_context
+from sqlalchemy import update as sa_update
 from open_webui.models.qc import QCTemplate
 from open_webui.constants import ERROR_MESSAGES
 from open_webui.config import QC_MAX_UPLOAD_BYTES, QC_MAX_PDF_PAGES
@@ -96,9 +97,9 @@ router = APIRouter()
 ############################
 
 
-def _check_qc_access(request, user):
+async def _check_qc_access(request, user):
     """Check if user has QC access permission."""
-    if user.role != "admin" and not has_permission(
+    if user.role != "admin" and not await has_permission(
         user.id,
         "features.qc",
         request.app.state.config.USER_PERMISSIONS,
@@ -120,7 +121,7 @@ async def get_system_prompts(
     categories: Optional[str] = Query(None),
     user=Depends(get_verified_user),
 ):
-    _check_qc_access(request, user)
+    await _check_qc_access(request, user)
     from open_webui.utils.qc_analysis import (
         QC_SYSTEM_PROMPT,
         EXTRACTION_SYSTEM_PROMPT,
@@ -154,7 +155,7 @@ async def get_system_prompts(
     }
 
 
-def _check_job_access(job, user, write=False):
+async def _check_job_access(job, user, write=False):
     """Check if user can access a job."""
     if not job:
         raise HTTPException(
@@ -166,7 +167,7 @@ def _check_job_access(job, user, write=False):
     if job.user_id == user.id:
         return
     permission = "write" if write else "read"
-    if AccessGrants.has_access(
+    if await AccessGrants.has_access(
         user_id=user.id,
         resource_type="qc_job",
         resource_id=job.id,
@@ -179,7 +180,7 @@ def _check_job_access(job, user, write=False):
     )
 
 
-def _check_template_access(template, user, write=False):
+async def _check_template_access(template, user, write=False):
     """Check if user can access a template."""
     if not template:
         raise HTTPException(
@@ -191,7 +192,7 @@ def _check_template_access(template, user, write=False):
     if template.user_id == user.id:
         return
     permission = "write" if write else "read"
-    if AccessGrants.has_access(
+    if await AccessGrants.has_access(
         user_id=user.id,
         resource_type="qc_template",
         resource_id=template.id,
@@ -204,7 +205,7 @@ def _check_template_access(template, user, write=False):
     )
 
 
-def _check_project_access(project, user, write=False):
+async def _check_project_access(project, user, write=False):
     """Check if user can access a project."""
     if not project:
         raise HTTPException(
@@ -231,10 +232,10 @@ async def get_projects(
     request: Request,
     user=Depends(get_verified_user),
 ):
-    _check_qc_access(request, user)
+    await _check_qc_access(request, user)
     if user.role == "admin":
-        return QCProjects.get_projects()
-    return QCProjects.get_projects(user_id=user.id)
+        return await QCProjects.get_projects()
+    return await QCProjects.get_projects(user_id=user.id)
 
 
 @router.post("/projects", response_model=Optional[QCProjectModel])
@@ -243,8 +244,8 @@ async def create_project(
     form_data: QCProjectForm,
     user=Depends(get_verified_user),
 ):
-    _check_qc_access(request, user)
-    project = QCProjects.insert_new_project(user.id, form_data)
+    await _check_qc_access(request, user)
+    project = await QCProjects.insert_new_project(user.id, form_data)
     if not project:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -259,10 +260,10 @@ async def get_project_by_id(
     request: Request,
     user=Depends(get_verified_user),
 ):
-    _check_qc_access(request, user)
-    project = QCProjects.get_project_by_id(id)
-    _check_project_access(project, user)
-    jobs = QCProjects.get_jobs_by_project_id(id)
+    await _check_qc_access(request, user)
+    project = await QCProjects.get_project_by_id(id)
+    await _check_project_access(project, user)
+    jobs = await QCProjects.get_jobs_by_project_id(id)
     return {**project.model_dump(), "jobs": [j.model_dump() for j in jobs]}
 
 
@@ -273,10 +274,10 @@ async def update_project(
     form_data: QCProjectForm,
     user=Depends(get_verified_user),
 ):
-    _check_qc_access(request, user)
-    project = QCProjects.get_project_by_id(id)
-    _check_project_access(project, user, write=True)
-    return QCProjects.update_project_by_id(id, form_data)
+    await _check_qc_access(request, user)
+    project = await QCProjects.get_project_by_id(id)
+    await _check_project_access(project, user, write=True)
+    return await QCProjects.update_project_by_id(id, form_data)
 
 
 @router.delete("/projects/{id}")
@@ -285,10 +286,10 @@ async def delete_project(
     request: Request,
     user=Depends(get_verified_user),
 ):
-    _check_qc_access(request, user)
-    project = QCProjects.get_project_by_id(id)
-    _check_project_access(project, user, write=True)
-    QCProjects.delete_project_by_id(id)
+    await _check_qc_access(request, user)
+    project = await QCProjects.get_project_by_id(id)
+    await _check_project_access(project, user, write=True)
+    await QCProjects.delete_project_by_id(id)
     return {"status": True}
 
 
@@ -304,7 +305,7 @@ async def ai_assist_checklist(
     user=Depends(get_verified_user),
 ):
     """Use AI to generate or suggest checklist items from knowledge base content."""
-    _check_qc_access(request, user)
+    await _check_qc_access(request, user)
 
     knowledge_base_ids = form_data.get("knowledge_base_ids", [])
     if not knowledge_base_ids:
@@ -336,8 +337,8 @@ async def get_templates(
     request: Request,
     user=Depends(get_verified_user),
 ):
-    _check_qc_access(request, user)
-    templates = QCTemplates.get_templates()
+    await _check_qc_access(request, user)
+    templates = await QCTemplates.get_templates()
     if user.role == "admin":
         return templates
     # Filter to templates user owns or has access to
@@ -345,7 +346,7 @@ async def get_templates(
         t
         for t in templates
         if t.user_id == user.id
-        or AccessGrants.has_access(
+        or await AccessGrants.has_access(
             user_id=user.id,
             resource_type="qc_template",
             resource_id=t.id,
@@ -360,9 +361,9 @@ async def get_template_by_id(
     request: Request,
     user=Depends(get_verified_user),
 ):
-    _check_qc_access(request, user)
-    template = QCTemplates.get_template_by_id(id)
-    _check_template_access(template, user)
+    await _check_qc_access(request, user)
+    template = await QCTemplates.get_template_by_id(id)
+    await _check_template_access(template, user)
     return template
 
 
@@ -372,8 +373,8 @@ async def create_template(
     form_data: QCTemplateForm,
     user=Depends(get_verified_user),
 ):
-    _check_qc_access(request, user)
-    template = QCTemplates.insert_new_template(user.id, form_data)
+    await _check_qc_access(request, user)
+    template = await QCTemplates.insert_new_template(user.id, form_data)
     if not template:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -391,11 +392,11 @@ async def update_template(
     change_summary: Optional[str] = Query(None),
     user=Depends(get_verified_user),
 ):
-    _check_qc_access(request, user)
-    template = QCTemplates.get_template_by_id(id)
-    _check_template_access(template, user, write=True)
+    await _check_qc_access(request, user)
+    template = await QCTemplates.get_template_by_id(id)
+    await _check_template_access(template, user, write=True)
     source = change_source if change_source in ("manual", "self_improve", "restore") else "manual"
-    updated = QCTemplates.update_template_by_id(
+    updated = await QCTemplates.update_template_by_id(
         id,
         form_data,
         change_source=source,
@@ -411,10 +412,10 @@ async def delete_template(
     request: Request,
     user=Depends(get_verified_user),
 ):
-    _check_qc_access(request, user)
-    template = QCTemplates.get_template_by_id(id)
-    _check_template_access(template, user, write=True)
-    QCTemplates.delete_template_by_id(id)
+    await _check_qc_access(request, user)
+    template = await QCTemplates.get_template_by_id(id)
+    await _check_template_access(template, user, write=True)
+    await QCTemplates.delete_template_by_id(id)
     return {"status": True}
 
 
@@ -424,9 +425,9 @@ async def clone_template(
     request: Request,
     user=Depends(get_verified_user),
 ):
-    _check_qc_access(request, user)
-    template = QCTemplates.get_template_by_id(id)
-    _check_template_access(template, user)
+    await _check_qc_access(request, user)
+    template = await QCTemplates.get_template_by_id(id)
+    await _check_template_access(template, user)
 
     clone_form = QCTemplateForm(
         name=f"{template.name} (Copy)",
@@ -435,7 +436,7 @@ async def clone_template(
         model_id=template.model_id,
         meta=template.meta,
     )
-    return QCTemplates.insert_new_template(user.id, clone_form)
+    return await QCTemplates.insert_new_template(user.id, clone_form)
 
 
 ############################
@@ -449,11 +450,11 @@ async def get_jobs(
     status_filter: Optional[str] = Query(None, alias="status"),
     user=Depends(get_verified_user),
 ):
-    _check_qc_access(request, user)
+    await _check_qc_access(request, user)
     if user.role == "admin":
-        jobs = QCJobs.get_jobs(status=status_filter)
+        jobs = await QCJobs.get_jobs(status=status_filter)
     else:
-        jobs = QCJobs.get_jobs(user_id=user.id, status=status_filter)
+        jobs = await QCJobs.get_jobs(user_id=user.id, status=status_filter)
     return jobs
 
 
@@ -463,9 +464,9 @@ async def get_job_by_id(
     request: Request,
     user=Depends(get_verified_user),
 ):
-    _check_qc_access(request, user)
-    job = QCJobs.get_job_by_id(id)
-    _check_job_access(job, user)
+    await _check_qc_access(request, user)
+    job = await QCJobs.get_job_by_id(id)
+    await _check_job_access(job, user)
     return job
 
 
@@ -475,17 +476,17 @@ async def create_job(
     form_data: QCJobForm,
     user=Depends(get_verified_user),
 ):
-    _check_qc_access(request, user)
+    await _check_qc_access(request, user)
 
     # If template_id provided, snapshot template settings (optionally from a pinned version)
     if form_data.template_id:
-        template = QCTemplates.get_template_by_id(form_data.template_id)
+        template = await QCTemplates.get_template_by_id(form_data.template_id)
         if template:
             # Resolve version to use: explicit pin > template's current_version_id
             pinned_version = None
             pin_version_id = form_data.template_version_id or template.current_version_id
             if pin_version_id:
-                pinned_version = QCTemplateVersions.get_version_by_id(pin_version_id)
+                pinned_version = await QCTemplateVersions.get_version_by_id(pin_version_id)
                 if pinned_version and pinned_version.template_id != template.id:
                     pinned_version = None
 
@@ -521,7 +522,7 @@ async def create_job(
                 kb_parts = []
                 for kb_id in knowledge_base_ids:
                     try:
-                        kb_files = Knowledges.get_files_by_id(kb_id)
+                        kb_files = await Knowledges.get_files_by_id(kb_id)
                         for f in kb_files:
                             file_content = (f.data or {}).get("content", "")
                             if file_content:
@@ -551,7 +552,7 @@ async def create_job(
 
             form_data.meta = job_meta
 
-    job = QCJobs.insert_new_job(user.id, form_data)
+    job = await QCJobs.insert_new_job(user.id, form_data)
     if not job:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -567,10 +568,10 @@ async def update_job(
     form_data: QCJobForm,
     user=Depends(get_verified_user),
 ):
-    _check_qc_access(request, user)
-    job = QCJobs.get_job_by_id(id)
-    _check_job_access(job, user, write=True)
-    return QCJobs.update_job_by_id(id, form_data)
+    await _check_qc_access(request, user)
+    job = await QCJobs.get_job_by_id(id)
+    await _check_job_access(job, user, write=True)
+    return await QCJobs.update_job_by_id(id, form_data)
 
 
 @router.delete("/jobs/{id}")
@@ -579,10 +580,10 @@ async def delete_job(
     request: Request,
     user=Depends(get_verified_user),
 ):
-    _check_qc_access(request, user)
-    job = QCJobs.get_job_by_id(id)
-    _check_job_access(job, user, write=True)
-    QCJobs.delete_job_by_id(id)
+    await _check_qc_access(request, user)
+    job = await QCJobs.get_job_by_id(id)
+    await _check_job_access(job, user, write=True)
+    await QCJobs.delete_job_by_id(id)
     return {"status": True}
 
 
@@ -594,9 +595,9 @@ async def run_job(
     user=Depends(get_verified_user),
 ):
     """Start QC analysis for a job. Runs in background."""
-    _check_qc_access(request, user)
-    job = QCJobs.get_job_by_id(id)
-    _check_job_access(job, user, write=True)
+    await _check_qc_access(request, user)
+    job = await QCJobs.get_job_by_id(id)
+    await _check_job_access(job, user, write=True)
 
     if job.status not in ("pending", "failed"):
         raise HTTPException(
@@ -611,7 +612,7 @@ async def run_job(
         )
 
     # Check documents exist
-    documents = QCJobDocuments.get_documents_by_job_id(id)
+    documents = await QCJobDocuments.get_documents_by_job_id(id)
     if not documents:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -621,7 +622,7 @@ async def run_job(
     from open_webui.utils.qc_analysis import run_qc_job
 
     background_tasks.add_task(run_qc_job, request, id, user)
-    QCJobs.update_job_status(id, "running")
+    await QCJobs.update_job_status(id, "running")
 
     return {"status": True, "message": "QC analysis started"}
 
@@ -633,9 +634,9 @@ async def self_improve_template(
     user=Depends(get_verified_user),
 ):
     """Analyze reviewed findings and suggest improvements to the source template."""
-    _check_qc_access(request, user)
-    job = QCJobs.get_job_by_id(job_id)
-    _check_job_access(job, user)
+    await _check_qc_access(request, user)
+    job = await QCJobs.get_job_by_id(job_id)
+    await _check_job_access(job, user)
 
     if job.status != "completed":
         raise HTTPException(
@@ -649,16 +650,16 @@ async def self_improve_template(
             detail="Job has no associated template",
         )
 
-    template = QCTemplates.get_template_by_id(job.template_id)
+    template = await QCTemplates.get_template_by_id(job.template_id)
     if not template:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Source template no longer exists",
         )
 
-    _check_template_access(template, user, write=True)
+    await _check_template_access(template, user, write=True)
 
-    findings = QCFindings.get_findings_by_job_id(job_id)
+    findings = await QCFindings.get_findings_by_job_id(job_id)
     has_reviewed = any(f.status in ("confirmed", "dismissed") for f in findings)
     has_human = any(f.source == "human" for f in findings)
     if not has_reviewed and not has_human:
@@ -688,12 +689,12 @@ async def export_job(
     user=Depends(get_verified_user),
 ):
     """Export job findings as JSON or CSV."""
-    _check_qc_access(request, user)
-    job = QCJobs.get_job_by_id(id)
-    _check_job_access(job, user)
+    await _check_qc_access(request, user)
+    job = await QCJobs.get_job_by_id(id)
+    await _check_job_access(job, user)
 
-    findings = QCFindings.get_findings_by_job_id(id)
-    documents = QCJobDocuments.get_documents_by_job_id(id)
+    findings = await QCFindings.get_findings_by_job_id(id)
+    documents = await QCJobDocuments.get_documents_by_job_id(id)
 
     if format == "csv":
         import csv
@@ -752,9 +753,9 @@ async def add_document(
     user=Depends(get_verified_user),
 ):
     """Upload a document (PDF/image) to a job and convert to page images."""
-    _check_qc_access(request, user)
-    job = QCJobs.get_job_by_id(job_id)
-    _check_job_access(job, user, write=True)
+    await _check_qc_access(request, user)
+    job = await QCJobs.get_job_by_id(job_id)
+    await _check_job_access(job, user, write=True)
 
     if job.status == "running":
         raise HTTPException(
@@ -809,7 +810,7 @@ async def add_document(
     )
 
     # Save file record
-    Files.insert_new_file(
+    await Files.insert_new_file(
         user.id,
         FileForm(
             id=file_id,
@@ -826,7 +827,7 @@ async def add_document(
 
     # Create QC document record
     doc_form = QCJobDocumentForm(file_id=file_id, document_type=document_type)
-    doc = QCJobDocuments.insert_document(job_id, doc_form)
+    doc = await QCJobDocuments.insert_document(job_id, doc_form)
 
     # Convert to page images
     page_images = {}
@@ -838,7 +839,7 @@ async def add_document(
         pages = convert_pdf_to_pages(actual_file_path)
 
         if len(pages) > QC_MAX_PDF_PAGES:
-            QCJobDocuments.delete_document(doc.id)
+            await QCJobDocuments.delete_document(doc.id)
             raise HTTPException(
                 status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
                 detail=(
@@ -860,7 +861,7 @@ async def add_document(
                 },
             )
 
-            Files.insert_new_file(
+            await Files.insert_new_file(
                 user.id,
                 FileForm(
                     id=page_file_id,
@@ -878,7 +879,7 @@ async def add_document(
             )
             page_images[str(page_num)] = page_file_id
 
-        QCJobDocuments.update_document(
+        await QCJobDocuments.update_document(
             doc.id,
             page_count=len(pages),
             status="pending",
@@ -887,7 +888,7 @@ async def add_document(
     elif content_type and content_type.startswith("image/"):
         # Single image - treat as page 1
         page_images["1"] = file_id
-        QCJobDocuments.update_document(
+        await QCJobDocuments.update_document(
             doc.id,
             page_count=1,
             status="pending",
@@ -895,14 +896,14 @@ async def add_document(
         )
     else:
         # Non-visual document (Excel, DOCX, etc.) - mark as pending for text analysis
-        QCJobDocuments.update_document(
+        await QCJobDocuments.update_document(
             doc.id,
             page_count=0,
             status="pending",
             meta={"page_images": {}},
         )
 
-    return QCJobDocuments.get_document_by_id(doc.id)
+    return await QCJobDocuments.get_document_by_id(doc.id)
 
 
 @router.get("/jobs/{job_id}/documents", response_model=list[QCJobDocumentModel])
@@ -911,10 +912,10 @@ async def get_documents(
     request: Request,
     user=Depends(get_verified_user),
 ):
-    _check_qc_access(request, user)
-    job = QCJobs.get_job_by_id(job_id)
-    _check_job_access(job, user)
-    return QCJobDocuments.get_documents_by_job_id(job_id)
+    await _check_qc_access(request, user)
+    job = await QCJobs.get_job_by_id(job_id)
+    await _check_job_access(job, user)
+    return await QCJobDocuments.get_documents_by_job_id(job_id)
 
 
 @router.delete("/jobs/{job_id}/documents/{doc_id}")
@@ -924,9 +925,9 @@ async def remove_document(
     request: Request,
     user=Depends(get_verified_user),
 ):
-    _check_qc_access(request, user)
-    job = QCJobs.get_job_by_id(job_id)
-    _check_job_access(job, user, write=True)
+    await _check_qc_access(request, user)
+    job = await QCJobs.get_job_by_id(job_id)
+    await _check_job_access(job, user, write=True)
 
     if job.status == "running":
         raise HTTPException(
@@ -934,7 +935,7 @@ async def remove_document(
             detail="Cannot remove documents while job is running",
         )
 
-    QCJobDocuments.delete_document(doc_id)
+    await QCJobDocuments.delete_document(doc_id)
     return {"status": True}
 
 
@@ -948,11 +949,11 @@ async def get_page_image(
     user=Depends(get_verified_user),
 ):
     """Get a page image (clean or annotated)."""
-    _check_qc_access(request, user)
-    job = QCJobs.get_job_by_id(job_id)
-    _check_job_access(job, user)
+    await _check_qc_access(request, user)
+    job = await QCJobs.get_job_by_id(job_id)
+    await _check_job_access(job, user)
 
-    doc = QCJobDocuments.get_document_by_id(doc_id)
+    doc = await QCJobDocuments.get_document_by_id(doc_id)
     if not doc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -974,7 +975,7 @@ async def get_page_image(
             detail=f"Page {page} image not found",
         )
 
-    file_record = Files.get_file_by_id(file_id)
+    file_record = await Files.get_file_by_id(file_id)
     if not file_record:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -1007,11 +1008,11 @@ async def get_findings(
     document_id: Optional[str] = None,
     user=Depends(get_verified_user),
 ):
-    _check_qc_access(request, user)
-    job = QCJobs.get_job_by_id(job_id)
-    _check_job_access(job, user)
+    await _check_qc_access(request, user)
+    job = await QCJobs.get_job_by_id(job_id)
+    await _check_job_access(job, user)
 
-    return QCFindings.get_findings_by_job_id(
+    return await QCFindings.get_findings_by_job_id(
         job_id,
         page_number=page_number,
         severity=severity,
@@ -1028,11 +1029,11 @@ async def create_finding(
     user=Depends(get_verified_user),
 ):
     """Create a manual (human) finding."""
-    _check_qc_access(request, user)
-    job = QCJobs.get_job_by_id(job_id)
-    _check_job_access(job, user, write=True)
+    await _check_qc_access(request, user)
+    job = await QCJobs.get_job_by_id(job_id)
+    await _check_job_access(job, user, write=True)
 
-    finding = QCFindings.insert_finding(user.id, job_id, form_data)
+    finding = await QCFindings.insert_finding(user.id, job_id, form_data)
     return finding
 
 
@@ -1047,18 +1048,18 @@ async def update_finding(
     form_data: QCFindingUpdateForm,
     user=Depends(get_verified_user),
 ):
-    _check_qc_access(request, user)
-    job = QCJobs.get_job_by_id(job_id)
-    _check_job_access(job, user, write=True)
+    await _check_qc_access(request, user)
+    job = await QCJobs.get_job_by_id(job_id)
+    await _check_job_access(job, user, write=True)
 
-    finding = QCFindings.get_finding_by_id(finding_id)
+    finding = await QCFindings.get_finding_by_id(finding_id)
     if not finding or finding.job_id != job_id:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Finding not found",
         )
 
-    return QCFindings.update_finding(finding_id, form_data)
+    return await QCFindings.update_finding(finding_id, form_data)
 
 
 @router.delete("/jobs/{job_id}/findings/{finding_id}")
@@ -1068,18 +1069,18 @@ async def delete_finding(
     request: Request,
     user=Depends(get_verified_user),
 ):
-    _check_qc_access(request, user)
-    job = QCJobs.get_job_by_id(job_id)
-    _check_job_access(job, user, write=True)
+    await _check_qc_access(request, user)
+    job = await QCJobs.get_job_by_id(job_id)
+    await _check_job_access(job, user, write=True)
 
-    finding = QCFindings.get_finding_by_id(finding_id)
+    finding = await QCFindings.get_finding_by_id(finding_id)
     if not finding or finding.job_id != job_id:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Finding not found",
         )
 
-    QCFindings.delete_finding(finding_id)
+    await QCFindings.delete_finding(finding_id)
     return {"status": True}
 
 
@@ -1098,11 +1099,11 @@ async def get_comments(
     request: Request,
     user=Depends(get_verified_user),
 ):
-    _check_qc_access(request, user)
-    job = QCJobs.get_job_by_id(job_id)
-    _check_job_access(job, user)
+    await _check_qc_access(request, user)
+    job = await QCJobs.get_job_by_id(job_id)
+    await _check_job_access(job, user)
 
-    return QCComments.get_comments_by_finding_id(finding_id)
+    return await QCComments.get_comments_by_finding_id(finding_id)
 
 
 @router.post(
@@ -1116,18 +1117,18 @@ async def create_comment(
     form_data: QCCommentForm,
     user=Depends(get_verified_user),
 ):
-    _check_qc_access(request, user)
-    job = QCJobs.get_job_by_id(job_id)
-    _check_job_access(job, user, write=True)
+    await _check_qc_access(request, user)
+    job = await QCJobs.get_job_by_id(job_id)
+    await _check_job_access(job, user, write=True)
 
-    finding = QCFindings.get_finding_by_id(finding_id)
+    finding = await QCFindings.get_finding_by_id(finding_id)
     if not finding or finding.job_id != job_id:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Finding not found",
         )
 
-    return QCComments.insert_comment(user.id, finding_id, job_id, form_data)
+    return await QCComments.insert_comment(user.id, finding_id, job_id, form_data)
 
 
 @router.delete("/jobs/{job_id}/findings/{finding_id}/comments/{comment_id}")
@@ -1138,11 +1139,11 @@ async def delete_comment(
     request: Request,
     user=Depends(get_verified_user),
 ):
-    _check_qc_access(request, user)
-    job = QCJobs.get_job_by_id(job_id)
-    _check_job_access(job, user, write=True)
+    await _check_qc_access(request, user)
+    job = await QCJobs.get_job_by_id(job_id)
+    await _check_job_access(job, user, write=True)
 
-    comment = QCComments.get_comment_by_id(comment_id)
+    comment = await QCComments.get_comment_by_id(comment_id)
     if not comment:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -1156,7 +1157,7 @@ async def delete_comment(
             detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
         )
 
-    QCComments.delete_comment(comment_id)
+    await QCComments.delete_comment(comment_id)
     return {"status": True}
 
 
@@ -1172,13 +1173,13 @@ async def get_checklist_status(
     user=Depends(get_verified_user),
 ):
     """Get checklist items with their findings count/status."""
-    _check_qc_access(request, user)
-    job = QCJobs.get_job_by_id(job_id)
-    _check_job_access(job, user)
+    await _check_qc_access(request, user)
+    job = await QCJobs.get_job_by_id(job_id)
+    await _check_job_access(job, user)
 
     meta = job.meta or {}
     checklist = meta.get("checklist_snapshot", [])
-    findings = QCFindings.get_findings_by_job_id(job_id)
+    findings = await QCFindings.get_findings_by_job_id(job_id)
 
     checklist_status = []
     for item in checklist:
@@ -1226,9 +1227,9 @@ async def create_revision(
     KB context of the source job. Documents are NOT copied — the client re-uploads
     through the standard documents/add endpoint.
     """
-    _check_qc_access(request, user)
-    prev_job = QCJobs.get_job_by_id(id)
-    _check_job_access(prev_job, user, write=True)
+    await _check_qc_access(request, user)
+    prev_job = await QCJobs.get_job_by_id(id)
+    await _check_job_access(prev_job, user, write=True)
 
     body = form_data or {}
     revision_label = body.get("revision_label") or None
@@ -1260,7 +1261,7 @@ async def create_revision(
         revision_label=revision_label,
         meta=new_meta,
     )
-    created = QCJobs.insert_new_job(user.id, new_form)
+    created = await QCJobs.insert_new_job(user.id, new_form)
     if not created:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -1277,15 +1278,15 @@ async def get_job_diff(
     user=Depends(get_verified_user),
 ):
     """Compute the revision diff between two jobs (id = previous, other_id = new)."""
-    _check_qc_access(request, user)
-    prev = QCJobs.get_job_by_id(id)
-    _check_job_access(prev, user)
-    new = QCJobs.get_job_by_id(other_id)
-    _check_job_access(new, user)
+    await _check_qc_access(request, user)
+    prev = await QCJobs.get_job_by_id(id)
+    await _check_job_access(prev, user)
+    new = await QCJobs.get_job_by_id(other_id)
+    await _check_job_access(new, user)
 
     from open_webui.utils.qc_revisions import compute_diff
 
-    return compute_diff(prev.id, new.id)
+    return await compute_diff(prev.id, new.id)
 
 
 @router.post("/jobs/{id}/diff/{other_id}/apply")
@@ -1300,18 +1301,18 @@ async def apply_job_diff(
 
     Body (optional): {"create_resolved_ghosts": bool}
     """
-    _check_qc_access(request, user)
-    prev = QCJobs.get_job_by_id(id)
-    _check_job_access(prev, user)
-    new = QCJobs.get_job_by_id(other_id)
-    _check_job_access(new, user, write=True)
+    await _check_qc_access(request, user)
+    prev = await QCJobs.get_job_by_id(id)
+    await _check_job_access(prev, user)
+    new = await QCJobs.get_job_by_id(other_id)
+    await _check_job_access(new, user, write=True)
 
     body = form_data or {}
     ghosts = bool(body.get("create_resolved_ghosts", False))
 
     from open_webui.utils.qc_revisions import apply_diff_to_new_job
 
-    return apply_diff_to_new_job(prev.id, new.id, create_resolved_ghosts=ghosts)
+    return await apply_diff_to_new_job(prev.id, new.id, create_resolved_ghosts=ghosts)
 
 
 ############################
@@ -1319,7 +1320,7 @@ async def apply_job_diff(
 ############################
 
 
-def _generate_report_background(
+async def _generate_report_background(
     report_id: str,
     job_id: str,
     user_id: str,
@@ -1328,11 +1329,11 @@ def _generate_report_background(
 ):
     """Background task: generate the report file and update status."""
     try:
-        QCReports.update_report(report_id, status="generating")
+        await QCReports.update_report(report_id, status="generating")
 
-        job = QCJobs.get_job_by_id(job_id)
-        documents = QCJobDocuments.get_documents_by_job_id(job_id)
-        findings = QCFindings.get_findings_by_job_id(job_id)
+        job = await QCJobs.get_job_by_id(job_id)
+        documents = await QCJobDocuments.get_documents_by_job_id(job_id)
+        findings = await QCFindings.get_findings_by_job_id(job_id)
 
         from open_webui.utils.qc_report import (
             generate_branded_pdf,
@@ -1344,7 +1345,7 @@ def _generate_report_background(
         if report_type == "branded_pdf":
             template_meta = None
             if job and job.template_id:
-                tpl = QCTemplates.get_template_by_id(job.template_id)
+                tpl = await QCTemplates.get_template_by_id(job.template_id)
                 template_meta = tpl.meta if tpl else None
             branding = _resolve_branding(job.meta if job else None, template_meta)
 
@@ -1360,7 +1361,7 @@ def _generate_report_background(
             )
             filename = f"qc_report_{job_id}.pdf"
             file_id = persist_report_bytes(user_id, job_id, filename, pdf_bytes, "application/pdf")
-            QCReports.update_report(
+            await QCReports.update_report(
                 report_id, status="ready", file_id=file_id, meta=meta
             )
 
@@ -1377,7 +1378,7 @@ def _generate_report_background(
             base_name = (doc_meta.get("name") or f"document_{doc_id}").rsplit(".", 1)[0]
             filename = f"{base_name}_redlined.pdf"
             file_id = persist_report_bytes(user_id, job_id, filename, pdf_bytes, "application/pdf")
-            QCReports.update_report(
+            await QCReports.update_report(
                 report_id, status="ready", file_id=file_id, meta=meta
             )
         else:
@@ -1385,7 +1386,7 @@ def _generate_report_background(
 
     except Exception as e:
         log.exception(f"Report generation failed for report_id={report_id}")
-        QCReports.update_report(
+        await QCReports.update_report(
             report_id,
             status="failed",
             meta={"error": str(e)},
@@ -1401,9 +1402,9 @@ async def create_report(
     user=Depends(get_verified_user),
 ):
     """Create a report generation task. Runs asynchronously; poll via GET reports/{id}."""
-    _check_qc_access(request, user)
-    job = QCJobs.get_job_by_id(id)
-    _check_job_access(job, user)
+    await _check_qc_access(request, user)
+    job = await QCJobs.get_job_by_id(id)
+    await _check_job_access(job, user)
 
     report_type = form_data.get("report_type")
     if report_type not in ("branded_pdf", "redlined_pdf", "json", "csv"):
@@ -1414,7 +1415,7 @@ async def create_report(
 
     options = form_data.get("options") or {}
 
-    report = QCReports.insert_report(
+    report = await QCReports.insert_report(
         user.id,
         id,
         QCReportForm(report_type=report_type, meta={"options": options}),
@@ -1437,13 +1438,13 @@ async def create_report(
     else:
         # json/csv can still be served by the existing /export endpoint; mark as ready
         # with no file_id — clients should prefer /export for those formats.
-        QCReports.update_report(
+        await QCReports.update_report(
             report.id,
             status="ready",
             meta={"note": "use /jobs/{id}/export for json/csv formats"},
         )
 
-    return QCReports.get_report_by_id(report.id)
+    return await QCReports.get_report_by_id(report.id)
 
 
 @router.get("/jobs/{id}/reports", response_model=list[QCReportModel])
@@ -1452,10 +1453,10 @@ async def list_reports(
     request: Request,
     user=Depends(get_verified_user),
 ):
-    _check_qc_access(request, user)
-    job = QCJobs.get_job_by_id(id)
-    _check_job_access(job, user)
-    return QCReports.get_reports_by_job_id(id)
+    await _check_qc_access(request, user)
+    job = await QCJobs.get_job_by_id(id)
+    await _check_job_access(job, user)
+    return await QCReports.get_reports_by_job_id(id)
 
 
 @router.get("/jobs/{id}/reports/{report_id}", response_model=Optional[QCReportModel])
@@ -1465,10 +1466,10 @@ async def get_report(
     request: Request,
     user=Depends(get_verified_user),
 ):
-    _check_qc_access(request, user)
-    job = QCJobs.get_job_by_id(id)
-    _check_job_access(job, user)
-    report = QCReports.get_report_by_id(report_id)
+    await _check_qc_access(request, user)
+    job = await QCJobs.get_job_by_id(id)
+    await _check_job_access(job, user)
+    report = await QCReports.get_report_by_id(report_id)
     if not report or report.job_id != id:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -1484,10 +1485,10 @@ async def download_report(
     request: Request,
     user=Depends(get_verified_user),
 ):
-    _check_qc_access(request, user)
-    job = QCJobs.get_job_by_id(id)
-    _check_job_access(job, user)
-    report = QCReports.get_report_by_id(report_id)
+    await _check_qc_access(request, user)
+    job = await QCJobs.get_job_by_id(id)
+    await _check_job_access(job, user)
+    report = await QCReports.get_report_by_id(report_id)
     if not report or report.job_id != id:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -1498,7 +1499,7 @@ async def download_report(
             status_code=status.HTTP_409_CONFLICT,
             detail=f"Report is {report.status}; not ready for download",
         )
-    file_record = Files.get_file_by_id(report.file_id)
+    file_record = await Files.get_file_by_id(report.file_id)
     if not file_record:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -1524,16 +1525,16 @@ async def delete_report(
     request: Request,
     user=Depends(get_verified_user),
 ):
-    _check_qc_access(request, user)
-    job = QCJobs.get_job_by_id(id)
-    _check_job_access(job, user, write=True)
-    report = QCReports.get_report_by_id(report_id)
+    await _check_qc_access(request, user)
+    job = await QCJobs.get_job_by_id(id)
+    await _check_job_access(job, user, write=True)
+    report = await QCReports.get_report_by_id(report_id)
     if not report or report.job_id != id:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Report not found",
         )
-    QCReports.delete_report(report_id)
+    await QCReports.delete_report(report_id)
     return {"status": True}
 
 
@@ -1561,9 +1562,9 @@ async def bulk_update_findings(
         "canonical_finding_id": str,               # for merge_duplicate (optional override)
       }
     """
-    _check_qc_access(request, user)
-    job = QCJobs.get_job_by_id(job_id)
-    _check_job_access(job, user, write=True)
+    await _check_qc_access(request, user)
+    job = await QCJobs.get_job_by_id(job_id)
+    await _check_job_access(job, user, write=True)
 
     finding_ids = form_data.get("finding_ids") or []
     action = form_data.get("action")
@@ -1575,20 +1576,20 @@ async def bulk_update_findings(
 
     updated = 0
     if action == "confirm":
-        updated = QCFindings.bulk_update_fields(job_id, finding_ids, {"status": "confirmed"})
+        updated = await QCFindings.bulk_update_fields(job_id, finding_ids, {"status": "confirmed"})
     elif action == "dismiss":
         reason = form_data.get("dismissal_reason")
         # For dismissal reason, update per-finding since meta merge is nuanced.
         updated = 0
         for fid in finding_ids:
-            finding = QCFindings.get_finding_by_id(fid)
+            finding = await QCFindings.get_finding_by_id(fid)
             if not finding or finding.job_id != job_id:
                 continue
             update_form = QCFindingUpdateForm(
                 status="dismissed",
                 meta={**(finding.meta or {}), "dismissal_reason": reason} if reason else None,
             )
-            QCFindings.update_finding(fid, update_form)
+            await QCFindings.update_finding(fid, update_form)
             updated += 1
     elif action == "severity":
         sev = form_data.get("severity")
@@ -1597,13 +1598,13 @@ async def bulk_update_findings(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="severity must be one of critical/major/minor/info",
             )
-        updated = QCFindings.bulk_update_fields(job_id, finding_ids, {"severity": sev})
+        updated = await QCFindings.bulk_update_fields(job_id, finding_ids, {"severity": sev})
     elif action == "delete":
         updated = 0
         for fid in finding_ids:
-            finding = QCFindings.get_finding_by_id(fid)
+            finding = await QCFindings.get_finding_by_id(fid)
             if finding and finding.job_id == job_id:
-                QCFindings.delete_finding(fid)
+                await QCFindings.delete_finding(fid)
                 updated += 1
     elif action == "merge_duplicate":
         # All finding_ids become duplicates of canonical_finding_id.
@@ -1613,20 +1614,20 @@ async def bulk_update_findings(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="canonical_finding_id required for merge_duplicate",
             )
-        canon_row = QCFindings.get_finding_by_id(canonical)
+        canon_row = await QCFindings.get_finding_by_id(canonical)
         if not canon_row or canon_row.job_id != job_id:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="canonical finding not found",
             )
         # Ensure canonical itself is not marked as duplicate
-        QCFindings.set_canonical(canonical, None)
+        await QCFindings.set_canonical(canonical, None)
         target_ids = [fid for fid in finding_ids if fid != canonical]
-        updated = QCFindings.bulk_update_fields(
+        updated = await QCFindings.bulk_update_fields(
             job_id, target_ids, {"canonical_finding_id": canonical}
         )
     elif action == "unlink_duplicate":
-        updated = QCFindings.bulk_update_fields(
+        updated = await QCFindings.bulk_update_fields(
             job_id, finding_ids, {"canonical_finding_id": None}
         )
     else:
@@ -1656,11 +1657,11 @@ async def update_finding_location(
     - `{"location": {x, y, width, height}}` — set explicitly.
     - `{"reference_text": "MT-415AB"}` — snap to actual text position via find_text_on_page.
     """
-    _check_qc_access(request, user)
-    job = QCJobs.get_job_by_id(job_id)
-    _check_job_access(job, user, write=True)
+    await _check_qc_access(request, user)
+    job = await QCJobs.get_job_by_id(job_id)
+    await _check_job_access(job, user, write=True)
 
-    finding = QCFindings.get_finding_by_id(finding_id)
+    finding = await QCFindings.get_finding_by_id(finding_id)
     if not finding or finding.job_id != job_id:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -1675,9 +1676,9 @@ async def update_finding_location(
         try:
             from open_webui.utils.qc_document import find_text_on_page
 
-            doc = QCJobDocuments.get_document_by_id(finding.document_id)
+            doc = await QCJobDocuments.get_document_by_id(finding.document_id)
             if doc:
-                file_record = Files.get_file_by_id(doc.file_id)
+                file_record = await Files.get_file_by_id(doc.file_id)
                 if file_record:
                     pdf_path = Storage.get_file(file_record.path)
                     matches = find_text_on_page(pdf_path, finding.page_number, ref_text)
@@ -1700,7 +1701,7 @@ async def update_finding_location(
     if ref_text:
         updated_meta["reference_text"] = ref_text
 
-    updated = QCFindings.update_finding(
+    updated = await QCFindings.update_finding(
         finding_id,
         QCFindingUpdateForm(location=new_location, meta=updated_meta),
     )
@@ -1719,11 +1720,11 @@ async def get_job_duplicates(
     user=Depends(get_verified_user),
 ):
     """Return duplicate clusters for this job."""
-    _check_qc_access(request, user)
-    job = QCJobs.get_job_by_id(job_id)
-    _check_job_access(job, user)
+    await _check_qc_access(request, user)
+    job = await QCJobs.get_job_by_id(job_id)
+    await _check_job_access(job, user)
 
-    findings = QCFindings.get_findings_by_job_id(job_id)
+    findings = await QCFindings.get_findings_by_job_id(job_id)
     clusters: dict[str, dict] = {}
     # Index canonical findings
     by_id = {f.id: f for f in findings}
@@ -1752,19 +1753,19 @@ async def recompute_duplicates(
     request: Request,
     user=Depends(get_verified_user),
 ):
-    _check_qc_access(request, user)
-    job = QCJobs.get_job_by_id(job_id)
-    _check_job_access(job, user, write=True)
+    await _check_qc_access(request, user)
+    job = await QCJobs.get_job_by_id(job_id)
+    await _check_job_access(job, user, write=True)
 
     from open_webui.utils.qc_duplicates import find_and_link_duplicates
 
     # Clear existing canonical links first so recompute is fresh
-    findings = QCFindings.get_findings_by_job_id(job_id)
+    findings = await QCFindings.get_findings_by_job_id(job_id)
     linked_ids = [f.id for f in findings if f.canonical_finding_id]
     if linked_ids:
-        QCFindings.bulk_update_fields(job_id, linked_ids, {"canonical_finding_id": None})
+        await QCFindings.bulk_update_fields(job_id, linked_ids, {"canonical_finding_id": None})
 
-    linked = find_and_link_duplicates(job_id)
+    linked = await find_and_link_duplicates(job_id)
     return {"status": True, "duplicates_linked": linked}
 
 
@@ -1773,7 +1774,7 @@ async def recompute_duplicates(
 ############################
 
 
-def _check_rule_access(rule, user, write=False):
+async def _check_rule_access(rule, user, write=False):
     if not rule:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -1797,12 +1798,12 @@ async def list_suppression_rules(
     project_id: Optional[str] = Query(None),
     user=Depends(get_verified_user),
 ):
-    _check_qc_access(request, user)
+    await _check_qc_access(request, user)
     if user.role == "admin":
-        return QCSuppressionRules.get_rules(
+        return await QCSuppressionRules.get_rules(
             scope=scope, template_id=template_id, project_id=project_id
         )
-    return QCSuppressionRules.get_rules(
+    return await QCSuppressionRules.get_rules(
         user_id=user.id, scope=scope, template_id=template_id, project_id=project_id
     )
 
@@ -1813,7 +1814,7 @@ async def create_suppression_rule(
     form_data: QCSuppressionRuleForm,
     user=Depends(get_verified_user),
 ):
-    _check_qc_access(request, user)
+    await _check_qc_access(request, user)
     if form_data.scope not in ("template", "project", "global"):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -1829,7 +1830,7 @@ async def create_suppression_rule(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="invalid match_type",
         )
-    return QCSuppressionRules.insert_rule(user.id, form_data)
+    return await QCSuppressionRules.insert_rule(user.id, form_data)
 
 
 @router.post(
@@ -1841,10 +1842,10 @@ async def update_suppression_rule(
     form_data: QCSuppressionRuleForm,
     user=Depends(get_verified_user),
 ):
-    _check_qc_access(request, user)
-    rule = QCSuppressionRules.get_rule_by_id(rule_id)
-    _check_rule_access(rule, user, write=True)
-    return QCSuppressionRules.update_rule(rule_id, form_data)
+    await _check_qc_access(request, user)
+    rule = await QCSuppressionRules.get_rule_by_id(rule_id)
+    await _check_rule_access(rule, user, write=True)
+    return await QCSuppressionRules.update_rule(rule_id, form_data)
 
 
 @router.delete("/suppression-rules/{rule_id}")
@@ -1853,10 +1854,10 @@ async def delete_suppression_rule(
     request: Request,
     user=Depends(get_verified_user),
 ):
-    _check_qc_access(request, user)
-    rule = QCSuppressionRules.get_rule_by_id(rule_id)
-    _check_rule_access(rule, user, write=True)
-    QCSuppressionRules.delete_rule(rule_id)
+    await _check_qc_access(request, user)
+    rule = await QCSuppressionRules.get_rule_by_id(rule_id)
+    await _check_rule_access(rule, user, write=True)
+    await QCSuppressionRules.delete_rule(rule_id)
     return {"status": True}
 
 
@@ -1869,10 +1870,10 @@ async def list_suppression_events(
     request: Request,
     user=Depends(get_verified_user),
 ):
-    _check_qc_access(request, user)
-    job = QCJobs.get_job_by_id(job_id)
-    _check_job_access(job, user)
-    return QCSuppressionEvents.get_events_by_job_id(job_id)
+    await _check_qc_access(request, user)
+    job = await QCJobs.get_job_by_id(job_id)
+    await _check_job_access(job, user)
+    return await QCSuppressionEvents.get_events_by_job_id(job_id)
 
 
 @router.post(
@@ -1892,11 +1893,11 @@ async def create_rule_from_finding(
       { "scope": "template|project|global" (default: "template"),
         "match_type": "...", "match_value": "...", "name": "...", "reason": "..." }
     """
-    _check_qc_access(request, user)
-    job = QCJobs.get_job_by_id(job_id)
-    _check_job_access(job, user, write=True)
+    await _check_qc_access(request, user)
+    job = await QCJobs.get_job_by_id(job_id)
+    await _check_job_access(job, user, write=True)
 
-    finding = QCFindings.get_finding_by_id(finding_id)
+    finding = await QCFindings.get_finding_by_id(finding_id)
     if not finding or finding.job_id != job_id:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -1931,7 +1932,7 @@ async def create_rule_from_finding(
         reason=reason,
         meta={"created_from_finding": finding_id, "job_id": job_id},
     )
-    return QCSuppressionRules.insert_rule(user.id, rule_form)
+    return await QCSuppressionRules.insert_rule(user.id, rule_form)
 
 
 ############################
@@ -1948,10 +1949,10 @@ async def list_template_versions(
     request: Request,
     user=Depends(get_verified_user),
 ):
-    _check_qc_access(request, user)
-    template = QCTemplates.get_template_by_id(id)
-    _check_template_access(template, user)
-    return QCTemplateVersions.get_versions_by_template_id(id)
+    await _check_qc_access(request, user)
+    template = await QCTemplates.get_template_by_id(id)
+    await _check_template_access(template, user)
+    return await QCTemplateVersions.get_versions_by_template_id(id)
 
 
 @router.get(
@@ -1965,12 +1966,12 @@ async def diff_template_versions(
     user=Depends(get_verified_user),
 ):
     """Return both versions' content — client diffs them."""
-    _check_qc_access(request, user)
-    template = QCTemplates.get_template_by_id(id)
-    _check_template_access(template, user)
+    await _check_qc_access(request, user)
+    template = await QCTemplates.get_template_by_id(id)
+    await _check_template_access(template, user)
 
-    va = QCTemplateVersions.get_version_by_number(id, a)
-    vb = QCTemplateVersions.get_version_by_number(id, b)
+    va = await QCTemplateVersions.get_version_by_number(id, a)
+    vb = await QCTemplateVersions.get_version_by_number(id, b)
     if not va or not vb:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -1989,10 +1990,10 @@ async def get_template_version(
     request: Request,
     user=Depends(get_verified_user),
 ):
-    _check_qc_access(request, user)
-    template = QCTemplates.get_template_by_id(id)
-    _check_template_access(template, user)
-    version = QCTemplateVersions.get_version_by_number(id, version_number)
+    await _check_qc_access(request, user)
+    template = await QCTemplates.get_template_by_id(id)
+    await _check_template_access(template, user)
+    version = await QCTemplateVersions.get_version_by_number(id, version_number)
     if not version:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -2017,11 +2018,11 @@ async def restore_template_version(
     back to the version being restored. The template is updated in place to
     match that content and current_version_id is pinned to the new version.
     """
-    _check_qc_access(request, user)
-    template = QCTemplates.get_template_by_id(id)
-    _check_template_access(template, user, write=True)
+    await _check_qc_access(request, user)
+    template = await QCTemplates.get_template_by_id(id)
+    await _check_template_access(template, user, write=True)
 
-    old = QCTemplateVersions.get_version_by_number(id, version_number)
+    old = await QCTemplateVersions.get_version_by_number(id, version_number)
     if not old:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -2043,8 +2044,8 @@ async def restore_template_version(
         return template
 
     # Force-create a version with change_source='restore' + parent pointing to the restored one
-    with get_db_context(None) as db:
-        new_version = QCTemplateVersions.create_version(
+    async with get_async_db_context(None) as db:
+        new_version = await QCTemplateVersions.create_version(
             template_id=id,
             user_id=user.id,
             name=restore_form.name,
@@ -2058,19 +2059,19 @@ async def restore_template_version(
             db=db,
         )
         # Apply content to the template row and pin
-        db.query(QCTemplate).filter_by(id=id).update(
-            {
-                "name": restore_form.name,
-                "description": restore_form.description,
-                "system_prompt": restore_form.system_prompt,
-                "model_id": restore_form.model_id,
-                "meta": restore_form.meta,
-                "current_version_id": new_version.id if new_version else template.current_version_id,
-                "updated_at": int(time.time()),
-            }
+        await db.execute(
+            sa_update(QCTemplate).filter_by(id=id).values(
+                name=restore_form.name,
+                description=restore_form.description,
+                system_prompt=restore_form.system_prompt,
+                model_id=restore_form.model_id,
+                meta=restore_form.meta,
+                current_version_id=new_version.id if new_version else template.current_version_id,
+                updated_at=int(time.time()),
+            )
         )
-        db.commit()
-    return QCTemplates.get_template_by_id(id)
+        await db.commit()
+    return await QCTemplates.get_template_by_id(id)
 
 
 def _would_create_new_version(template: QCTemplateModel, form: QCTemplateForm) -> bool:
@@ -2084,7 +2085,7 @@ def _would_create_new_version(template: QCTemplateModel, form: QCTemplateForm) -
 ############################
 
 
-def _check_test_set_access(test_set, user, write=False):
+async def _check_test_set_access(test_set, user, write=False):
     if not test_set:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -2100,7 +2101,7 @@ def _check_test_set_access(test_set, user, write=False):
     )
 
 
-def _check_test_run_access(run, user):
+async def _check_test_run_access(run, user):
     if not run:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -2121,10 +2122,10 @@ async def list_test_sets(
     request: Request,
     user=Depends(get_verified_user),
 ):
-    _check_qc_access(request, user)
+    await _check_qc_access(request, user)
     if user.role == "admin":
-        return QCTestSets.get_test_sets()
-    return QCTestSets.get_test_sets(user_id=user.id)
+        return await QCTestSets.get_test_sets()
+    return await QCTestSets.get_test_sets(user_id=user.id)
 
 
 @router.post("/test-sets", response_model=Optional[QCTestSetModel])
@@ -2133,8 +2134,8 @@ async def create_test_set(
     form_data: QCTestSetForm,
     user=Depends(get_verified_user),
 ):
-    _check_qc_access(request, user)
-    return QCTestSets.insert_test_set(user.id, form_data)
+    await _check_qc_access(request, user)
+    return await QCTestSets.insert_test_set(user.id, form_data)
 
 
 @router.get("/test-sets/{id}")
@@ -2143,11 +2144,11 @@ async def get_test_set(
     request: Request,
     user=Depends(get_verified_user),
 ):
-    _check_qc_access(request, user)
-    ts = QCTestSets.get_test_set_by_id(id)
-    _check_test_set_access(ts, user)
-    docs = QCTestSetDocuments.get_documents_by_test_set_id(id)
-    expected = QCTestSetExpectedFindings.get_expected_by_test_set_id(id)
+    await _check_qc_access(request, user)
+    ts = await QCTestSets.get_test_set_by_id(id)
+    await _check_test_set_access(ts, user)
+    docs = await QCTestSetDocuments.get_documents_by_test_set_id(id)
+    expected = await QCTestSetExpectedFindings.get_expected_by_test_set_id(id)
     return {
         **ts.model_dump(),
         "documents": [d.model_dump() for d in docs],
@@ -2162,10 +2163,10 @@ async def update_test_set(
     form_data: QCTestSetForm,
     user=Depends(get_verified_user),
 ):
-    _check_qc_access(request, user)
-    ts = QCTestSets.get_test_set_by_id(id)
-    _check_test_set_access(ts, user, write=True)
-    return QCTestSets.update_test_set(id, form_data)
+    await _check_qc_access(request, user)
+    ts = await QCTestSets.get_test_set_by_id(id)
+    await _check_test_set_access(ts, user, write=True)
+    return await QCTestSets.update_test_set(id, form_data)
 
 
 @router.delete("/test-sets/{id}")
@@ -2174,10 +2175,10 @@ async def delete_test_set(
     request: Request,
     user=Depends(get_verified_user),
 ):
-    _check_qc_access(request, user)
-    ts = QCTestSets.get_test_set_by_id(id)
-    _check_test_set_access(ts, user, write=True)
-    QCTestSets.delete_test_set(id)
+    await _check_qc_access(request, user)
+    ts = await QCTestSets.get_test_set_by_id(id)
+    await _check_test_set_access(ts, user, write=True)
+    await QCTestSets.delete_test_set(id)
     return {"status": True}
 
 
@@ -2188,14 +2189,14 @@ async def add_test_set_document(
     file: UploadFile = File(...),
     user=Depends(get_verified_user),
 ):
-    _check_qc_access(request, user)
-    ts = QCTestSets.get_test_set_by_id(id)
-    _check_test_set_access(ts, user, write=True)
+    await _check_qc_access(request, user)
+    ts = await QCTestSets.get_test_set_by_id(id)
+    await _check_test_set_access(ts, user, write=True)
 
     from open_webui.utils.qc_document import ingest_file_as_document
 
     try:
-        file_id, page_images, page_count, _size = ingest_file_as_document(
+        file_id, page_images, page_count, _size = await ingest_file_as_document(
             user.id,
             file,
             max_upload_bytes=QC_MAX_UPLOAD_BYTES,
@@ -2211,7 +2212,7 @@ async def add_test_set_document(
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=str(oe)
         )
 
-    doc = QCTestSetDocuments.insert_document(
+    doc = await QCTestSetDocuments.insert_document(
         test_set_id=id,
         file_id=file_id,
         name=file.filename,
@@ -2228,10 +2229,10 @@ async def remove_test_set_document(
     request: Request,
     user=Depends(get_verified_user),
 ):
-    _check_qc_access(request, user)
-    ts = QCTestSets.get_test_set_by_id(id)
-    _check_test_set_access(ts, user, write=True)
-    QCTestSetDocuments.delete_document(doc_id)
+    await _check_qc_access(request, user)
+    ts = await QCTestSets.get_test_set_by_id(id)
+    await _check_test_set_access(ts, user, write=True)
+    await QCTestSetDocuments.delete_document(doc_id)
     return {"status": True}
 
 
@@ -2244,10 +2245,10 @@ async def list_expected_findings(
     request: Request,
     user=Depends(get_verified_user),
 ):
-    _check_qc_access(request, user)
-    ts = QCTestSets.get_test_set_by_id(id)
-    _check_test_set_access(ts, user)
-    return QCTestSetExpectedFindings.get_expected_by_test_set_id(id)
+    await _check_qc_access(request, user)
+    ts = await QCTestSets.get_test_set_by_id(id)
+    await _check_test_set_access(ts, user)
+    return await QCTestSetExpectedFindings.get_expected_by_test_set_id(id)
 
 
 @router.post(
@@ -2260,10 +2261,10 @@ async def create_expected_finding(
     form_data: QCTestSetExpectedFindingForm,
     user=Depends(get_verified_user),
 ):
-    _check_qc_access(request, user)
-    ts = QCTestSets.get_test_set_by_id(id)
-    _check_test_set_access(ts, user, write=True)
-    return QCTestSetExpectedFindings.insert_expected(id, form_data)
+    await _check_qc_access(request, user)
+    ts = await QCTestSets.get_test_set_by_id(id)
+    await _check_test_set_access(ts, user, write=True)
+    return await QCTestSetExpectedFindings.insert_expected(id, form_data)
 
 
 @router.post(
@@ -2277,10 +2278,10 @@ async def update_expected_finding(
     form_data: QCTestSetExpectedFindingForm,
     user=Depends(get_verified_user),
 ):
-    _check_qc_access(request, user)
-    ts = QCTestSets.get_test_set_by_id(id)
-    _check_test_set_access(ts, user, write=True)
-    return QCTestSetExpectedFindings.update_expected(ef_id, form_data)
+    await _check_qc_access(request, user)
+    ts = await QCTestSets.get_test_set_by_id(id)
+    await _check_test_set_access(ts, user, write=True)
+    return await QCTestSetExpectedFindings.update_expected(ef_id, form_data)
 
 
 @router.delete("/test-sets/{id}/expected-findings/{ef_id}")
@@ -2290,10 +2291,10 @@ async def delete_expected_finding(
     request: Request,
     user=Depends(get_verified_user),
 ):
-    _check_qc_access(request, user)
-    ts = QCTestSets.get_test_set_by_id(id)
-    _check_test_set_access(ts, user, write=True)
-    QCTestSetExpectedFindings.delete_expected(ef_id)
+    await _check_qc_access(request, user)
+    ts = await QCTestSets.get_test_set_by_id(id)
+    await _check_test_set_access(ts, user, write=True)
+    await QCTestSetExpectedFindings.delete_expected(ef_id)
     return {"status": True}
 
 
@@ -2311,21 +2312,21 @@ async def seed_test_set_from_job(
     Only findings whose `document_id` maps to a `file_id` already present in this
     test set are copied (matched via `qc_test_set_document.file_id`).
     """
-    _check_qc_access(request, user)
-    ts = QCTestSets.get_test_set_by_id(id)
-    _check_test_set_access(ts, user, write=True)
-    job = QCJobs.get_job_by_id(job_id)
-    _check_job_access(job, user)
+    await _check_qc_access(request, user)
+    ts = await QCTestSets.get_test_set_by_id(id)
+    await _check_test_set_access(ts, user, write=True)
+    job = await QCJobs.get_job_by_id(job_id)
+    await _check_job_access(job, user)
 
-    ts_docs = QCTestSetDocuments.get_documents_by_test_set_id(id)
+    ts_docs = await QCTestSetDocuments.get_documents_by_test_set_id(id)
     # file_id -> test set document id
     ts_doc_by_file_id = {d.file_id: d.id for d in ts_docs}
 
-    job_docs = QCJobDocuments.get_documents_by_job_id(job_id)
+    job_docs = await QCJobDocuments.get_documents_by_job_id(job_id)
     # job document id -> file_id
     job_doc_file_ids = {d.id: d.file_id for d in job_docs}
 
-    findings = QCFindings.get_findings_by_job_id(job_id) or []
+    findings = await QCFindings.get_findings_by_job_id(job_id) or []
     seeded = 0
     for f in findings:
         if f.status != "confirmed":
@@ -2347,7 +2348,7 @@ async def seed_test_set_from_job(
             match_title_patterns=None,
             seeded_from_finding_id=f.id,
         )
-        QCTestSetExpectedFindings.insert_expected(id, form)
+        await QCTestSetExpectedFindings.insert_expected(id, form)
         seeded += 1
     return {"status": True, "seeded": seeded}
 
@@ -2363,9 +2364,9 @@ async def run_test_set(
     """Run a test set against a template. Creates a shadow QC job that will trigger
     metric computation when it finishes.
     """
-    _check_qc_access(request, user)
-    ts = QCTestSets.get_test_set_by_id(id)
-    _check_test_set_access(ts, user)
+    await _check_qc_access(request, user)
+    ts = await QCTestSets.get_test_set_by_id(id)
+    await _check_test_set_access(ts, user)
 
     template_id = form_data.get("template_id")
     if not template_id:
@@ -2373,13 +2374,13 @@ async def run_test_set(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="template_id required",
         )
-    template = QCTemplates.get_template_by_id(template_id)
-    _check_template_access(template, user)
+    template = await QCTemplates.get_template_by_id(template_id)
+    await _check_template_access(template, user)
 
     template_version_id = form_data.get("template_version_id") or template.current_version_id
     pinned_version = None
     if template_version_id:
-        pinned_version = QCTemplateVersions.get_version_by_id(template_version_id)
+        pinned_version = await QCTemplateVersions.get_version_by_id(template_version_id)
         if pinned_version and pinned_version.template_id != template.id:
             pinned_version = None
 
@@ -2398,7 +2399,7 @@ async def run_test_set(
         )
 
     # Create the test run row first so we can point the shadow job at it.
-    test_run = QCTestRuns.insert_run(
+    test_run = await QCTestRuns.insert_run(
         user_id=user.id,
         test_set_id=id,
         template_id=template.id,
@@ -2428,7 +2429,7 @@ async def run_test_set(
         kb_parts = []
         for kb_id in kb_ids:
             try:
-                kb_files = Knowledges.get_files_by_id(kb_id)
+                kb_files = await Knowledges.get_files_by_id(kb_id)
                 for f in kb_files:
                     file_content = (f.data or {}).get("content", "")
                     if file_content:
@@ -2444,7 +2445,7 @@ async def run_test_set(
         if kb_context:
             job_meta["kb_context"] = kb_context
 
-    shadow_job = QCJobs.insert_new_job(
+    shadow_job = await QCJobs.insert_new_job(
         user.id,
         QCJobForm(
             name=f"[Test] {ts.name}",
@@ -2457,33 +2458,33 @@ async def run_test_set(
         ),
     )
     if not shadow_job:
-        QCTestRuns.update_run(test_run.id, status="failed", meta={"error": "Failed to create shadow job"})
+        await QCTestRuns.update_run(test_run.id, status="failed", meta={"error": "Failed to create shadow job"})
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Failed to create shadow job",
         )
 
     # Copy test-set documents into qc_job_document (share same file_id + page_images).
-    ts_docs = QCTestSetDocuments.get_documents_by_test_set_id(id)
+    ts_docs = await QCTestSetDocuments.get_documents_by_test_set_id(id)
     if not ts_docs:
-        QCTestRuns.update_run(test_run.id, status="failed", meta={"error": "Test set has no documents"})
+        await QCTestRuns.update_run(test_run.id, status="failed", meta={"error": "Test set has no documents"})
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Test set has no documents",
         )
     for td in ts_docs:
-        job_doc = QCJobDocuments.insert_document(
+        job_doc = await QCJobDocuments.insert_document(
             shadow_job.id,
             QCJobDocumentForm(file_id=td.file_id, document_type="subject"),
         )
-        QCJobDocuments.update_document(
+        await QCJobDocuments.update_document(
             job_doc.id,
             page_count=td.page_count,
             status="pending",
             meta={"page_images": (td.meta or {}).get("page_images", {})},
         )
 
-    QCTestRuns.update_run(
+    await QCTestRuns.update_run(
         test_run.id,
         status="running",
         shadow_job_id=shadow_job.id,
@@ -2492,9 +2493,9 @@ async def run_test_set(
     from open_webui.utils.qc_analysis import run_qc_job
 
     background_tasks.add_task(run_qc_job, request, shadow_job.id, user)
-    QCJobs.update_job_status(shadow_job.id, "running")
+    await QCJobs.update_job_status(shadow_job.id, "running")
 
-    return QCTestRuns.get_run_by_id(test_run.id)
+    return await QCTestRuns.get_run_by_id(test_run.id)
 
 
 @router.get("/test-runs", response_model=list[QCTestRunModel])
@@ -2503,10 +2504,10 @@ async def list_test_runs(
     test_set_id: Optional[str] = Query(None),
     user=Depends(get_verified_user),
 ):
-    _check_qc_access(request, user)
+    await _check_qc_access(request, user)
     if user.role == "admin":
-        return QCTestRuns.get_runs(test_set_id=test_set_id)
-    return QCTestRuns.get_runs(user_id=user.id, test_set_id=test_set_id)
+        return await QCTestRuns.get_runs(test_set_id=test_set_id)
+    return await QCTestRuns.get_runs(user_id=user.id, test_set_id=test_set_id)
 
 
 @router.get("/test-runs/{id}")
@@ -2515,8 +2516,8 @@ async def get_test_run(
     request: Request,
     user=Depends(get_verified_user),
 ):
-    _check_qc_access(request, user)
-    run = QCTestRuns.get_run_by_id(id)
-    _check_test_run_access(run, user)
-    test_set = QCTestSets.get_test_set_by_id(run.test_set_id)
+    await _check_qc_access(request, user)
+    run = await QCTestRuns.get_run_by_id(id)
+    await _check_test_run_access(run, user)
+    test_set = await QCTestSets.get_test_set_by_id(run.test_set_id)
     return {**run.model_dump(), "test_set": test_set.model_dump() if test_set else None}

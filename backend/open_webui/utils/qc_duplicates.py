@@ -4,8 +4,10 @@ import logging
 import re
 from typing import Optional
 
+from sqlalchemy import select
+
 from open_webui.models.qc import QCFindings, QCFinding
-from open_webui.internal.db import get_db_context
+from open_webui.internal.db import get_async_db_context
 
 log = logging.getLogger(__name__)
 
@@ -103,13 +105,13 @@ def _canonical_of(group: list) -> object:
     return min(group, key=key)
 
 
-def find_and_link_duplicates(job_id: str) -> int:
+async def find_and_link_duplicates(job_id: str) -> int:
     """Cluster near-duplicate findings within a job and set canonical_finding_id.
 
     Returns number of findings newly linked to a canonical (excluding the canonicals themselves).
     Does not delete any finding.
     """
-    findings = QCFindings.get_findings_by_job_id(job_id) or []
+    findings = await QCFindings.get_findings_by_job_id(job_id) or []
     # Only consider findings that aren't ghost-resolved and aren't already linked to canonical
     active = [
         f for f in findings
@@ -123,7 +125,7 @@ def find_and_link_duplicates(job_id: str) -> int:
         groups.setdefault(key, []).append(f)
 
     linked_total = 0
-    with get_db_context(None) as db:
+    async with get_async_db_context(None) as db:
         for key, group in groups.items():
             if len(group) < 2:
                 continue
@@ -146,7 +148,7 @@ def find_and_link_duplicates(job_id: str) -> int:
                 for member in cluster:
                     new_val = None if member.id == canonical_id else canonical_id
                     # Skip write if already correct
-                    row = db.query(QCFinding).filter_by(id=member.id).first()
+                    row = (await db.execute(select(QCFinding).filter_by(id=member.id))).scalars().first()
                     if not row:
                         continue
                     if row.canonical_finding_id == new_val:
@@ -154,6 +156,6 @@ def find_and_link_duplicates(job_id: str) -> int:
                     row.canonical_finding_id = new_val
                     if new_val:
                         linked_total += 1
-        db.commit()
+        await db.commit()
 
     return linked_total

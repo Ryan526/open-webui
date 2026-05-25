@@ -7,13 +7,15 @@ import uuid
 from difflib import SequenceMatcher
 from typing import Optional
 
+from sqlalchemy import select
+
 from open_webui.models.qc import (
     QCFinding,
     QCFindingModel,
     QCFindings,
     QCJobs,
 )
-from open_webui.internal.db import get_db_context
+from open_webui.internal.db import get_async_db_context
 
 log = logging.getLogger(__name__)
 
@@ -154,7 +156,7 @@ def match_findings(
     return matches
 
 
-def compute_diff(prev_job_id: str, new_job_id: str) -> dict:
+async def compute_diff(prev_job_id: str, new_job_id: str) -> dict:
     """Compute the revision diff between two jobs.
 
     Returns:
@@ -164,8 +166,8 @@ def compute_diff(prev_job_id: str, new_job_id: str) -> dict:
           - new: list of {new_finding}
           - stats: counts
     """
-    prev = QCFindings.get_findings_by_job_id(prev_job_id) or []
-    new = QCFindings.get_findings_by_job_id(new_job_id) or []
+    prev = await QCFindings.get_findings_by_job_id(prev_job_id) or []
+    new = await QCFindings.get_findings_by_job_id(new_job_id) or []
 
     # Exclude prior resolved-ghost rows from prev (already denote resolved state)
     prev = [f for f in prev if f.revision_state != "resolved"]
@@ -206,7 +208,7 @@ def compute_diff(prev_job_id: str, new_job_id: str) -> dict:
     }
 
 
-def apply_diff_to_new_job(
+async def apply_diff_to_new_job(
     prev_job_id: str,
     new_job_id: str,
     *,
@@ -222,23 +224,23 @@ def apply_diff_to_new_job(
 
     Returns dict with counts + marker timestamp.
     """
-    diff = compute_diff(prev_job_id, new_job_id)
+    diff = await compute_diff(prev_job_id, new_job_id)
 
     carried_applied = 0
     resolved_created = 0
     new_tagged = 0
 
-    new_job = QCJobs.get_job_by_id(new_job_id)
+    new_job = await QCJobs.get_job_by_id(new_job_id)
     if not new_job:
         return {"error": "new_job_not_found"}
 
-    with get_db_context(None) as db:
+    async with get_async_db_context(None) as db:
         # Carried over: link prev -> new + inherit prev status for confirmed/dismissed
         for entry in diff["carried_over"]:
             prev_f = entry["prev_finding"]
             new_f = entry["new_finding"]
 
-            new_row = db.query(QCFinding).filter_by(id=new_f["id"]).first()
+            new_row = (await db.execute(select(QCFinding).filter_by(id=new_f["id"]))).scalars().first()
             if not new_row:
                 continue
             new_row.previous_finding_id = prev_f["id"]
@@ -255,7 +257,7 @@ def apply_diff_to_new_job(
         # New: tag
         for entry in diff["new"]:
             new_f = entry["new_finding"]
-            new_row = db.query(QCFinding).filter_by(id=new_f["id"]).first()
+            new_row = (await db.execute(select(QCFinding).filter_by(id=new_f["id"]))).scalars().first()
             if not new_row:
                 continue
             new_row.revision_state = "new"
@@ -268,23 +270,24 @@ def apply_diff_to_new_job(
                 prev_f = entry["prev_finding"]
                 # Skip if an idempotent ghost already exists (linked to this prev)
                 existing = (
-                    db.query(QCFinding)
-                    .filter_by(
-                        job_id=new_job_id,
-                        previous_finding_id=prev_f["id"],
-                        revision_state="resolved",
+                    await db.execute(
+                        select(QCFinding).filter_by(
+                            job_id=new_job_id,
+                            previous_finding_id=prev_f["id"],
+                            revision_state="resolved",
+                        )
                     )
-                    .first()
-                )
+                ).scalars().first()
                 if existing:
                     continue
                 # Next finding_number
                 max_num_row = (
-                    db.query(QCFinding.finding_number)
-                    .filter_by(job_id=new_job_id)
-                    .order_by(QCFinding.finding_number.desc())
-                    .first()
-                )
+                    await db.execute(
+                        select(QCFinding.finding_number)
+                        .filter_by(job_id=new_job_id)
+                        .order_by(QCFinding.finding_number.desc())
+                    )
+                ).first()
                 next_num = (
                     (max_num_row[0] or 0) + 1
                     if max_num_row and max_num_row[0]
@@ -314,21 +317,21 @@ def apply_diff_to_new_job(
                 db.add(ghost)
                 resolved_created += 1
 
-        db.commit()
+        await db.commit()
 
     # Record marker in job meta
     marker = int(time.time())
     job_meta = dict(new_job.meta or {})
     job_meta["revision_diff_applied_at"] = marker
     job_meta["revision_diff_stats"] = diff["stats"]
-    with get_db_context(None) as db:
+    async with get_async_db_context(None) as db:
         from open_webui.models.qc import QCJob
 
-        row = db.query(QCJob).filter_by(id=new_job_id).first()
+        row = (await db.execute(select(QCJob).filter_by(id=new_job_id))).scalars().first()
         if row:
             row.meta = job_meta
             row.updated_at = int(time.time())
-            db.commit()
+            await db.commit()
 
     return {
         "carried_over_applied": carried_applied,

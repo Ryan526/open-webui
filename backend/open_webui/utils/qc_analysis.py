@@ -1245,7 +1245,7 @@ async def _run_cross_reference_pass(
         "phase": "cross_reference_extraction",
         "detail": "Extracting structured data from pages...",
     }}
-    QCJobs.update_job_status(job_id, "running", meta=progress_meta)
+    await QCJobs.update_job_status(job_id, "running", meta=progress_meta)
 
     # Step A: Extract structured data from each page
     documents_data = []
@@ -1284,7 +1284,7 @@ async def _run_cross_reference_pass(
         # Store extracted data in document meta
         if page_extractions:
             updated_meta = {**(doc.meta or {}), "extracted_data": page_extractions}
-            QCJobDocuments.update_document(doc.id, meta=updated_meta)
+            await QCJobDocuments.update_document(doc.id, meta=updated_meta)
 
         # Get document name for the index
         doc_name = "Unknown"
@@ -1310,7 +1310,7 @@ async def _run_cross_reference_pass(
             "phase": "cross_reference_correlation",
             "detail": f"Cross-referencing data across {total_pages} pages...",
         }}
-        QCJobs.update_job_status(job_id, "running", meta=progress_meta)
+        await QCJobs.update_job_status(job_id, "running", meta=progress_meta)
 
         xref_index = build_cross_reference_index(documents_data, categories=categories)
 
@@ -1332,9 +1332,9 @@ async def _run_cross_reference_pass(
                 )
                 if should_suppress and matched_rule_id:
                     try:
-                        QCSuppressionRules.record_hit(matched_rule_id)
+                        await QCSuppressionRules.record_hit(matched_rule_id)
                         refs0 = xref_finding.get("references") or [{}]
-                        QCSuppressionEvents.insert_event(
+                        await QCSuppressionEvents.insert_event(
                             matched_rule_id,
                             job_id,
                             refs0[0].get("document_id") if refs0 else None,
@@ -1352,7 +1352,7 @@ async def _run_cross_reference_pass(
             primary_page = refs[0]["page_number"] if refs else None
             primary_ref_text = refs[0].get("reference_text") if refs else None
 
-            finding_number = QCFindings.get_next_finding_number(job_id)
+            finding_number = await QCFindings.get_next_finding_number(job_id)
             title_val = xref_finding.get("title", "Cross-Reference Issue")
             finding_data = {
                 "id": str(uuid.uuid4()),
@@ -1384,7 +1384,7 @@ async def _run_cross_reference_pass(
                 "created_at": int(time.time()),
                 "updated_at": int(time.time()),
             }
-            QCFindings.insert_finding_raw(finding_data)
+            await QCFindings.insert_finding_raw(finding_data)
             cross_ref_findings_count += 1
 
         log.info(
@@ -1417,15 +1417,15 @@ async def run_qc_job(
     from open_webui.models.files import Files, FileForm
     from open_webui.storage.provider import Storage
 
-    job = QCJobs.get_job_by_id(job_id)
+    job = await QCJobs.get_job_by_id(job_id)
     if not job:
         raise ValueError(f"Job {job_id} not found")
 
     # Update status to running
-    QCJobs.update_job_status(job_id, "running")
+    await QCJobs.update_job_status(job_id, "running")
 
     # Clear previous findings from any prior run
-    deleted = QCFindings.delete_findings_by_job_id(job_id)
+    deleted = await QCFindings.delete_findings_by_job_id(job_id)
     if deleted:
         log.info(f"Cleared {deleted} existing findings for job {job_id}")
 
@@ -1438,7 +1438,7 @@ async def run_qc_job(
     kb_context = meta.get("kb_context", "")
     full_prompt = build_qc_prompt(system_prompt, checklist, kb_context)
 
-    documents = QCJobDocuments.get_documents_by_job_id(job_id)
+    documents = await QCJobDocuments.get_documents_by_job_id(job_id)
 
     # Build a map of document_id -> original PDF path for text search
     doc_pdf_paths = {}
@@ -1472,14 +1472,14 @@ async def run_qc_job(
         proj_id = getattr(job, "project_id", None)
         if tmpl_id:
             active_suppression_rules.extend(
-                QCSuppressionRules.get_rules(template_id=tmpl_id, enabled_only=True)
+                await QCSuppressionRules.get_rules(template_id=tmpl_id, enabled_only=True)
             )
         if proj_id:
             active_suppression_rules.extend(
-                QCSuppressionRules.get_rules(project_id=proj_id, enabled_only=True)
+                await QCSuppressionRules.get_rules(project_id=proj_id, enabled_only=True)
             )
         active_suppression_rules.extend(
-            QCSuppressionRules.get_rules(scope="global", enabled_only=True)
+            await QCSuppressionRules.get_rules(scope="global", enabled_only=True)
         )
     except Exception as e:
         log.warning(f"Failed to load suppression rules for job {job_id}: {e}")
@@ -1521,21 +1521,21 @@ async def run_qc_job(
                 "phase": "per_page_analysis",
                 "detail": "Analyzing pages...",
             }}
-            QCJobs.update_job_status(job_id, "running", meta=progress_meta)
+            await QCJobs.update_job_status(job_id, "running", meta=progress_meta)
 
         # Reset page count (we'll re-count during actual analysis)
         total_pages = 0
 
         for doc in documents:
             try:
-                QCJobDocuments.update_document(doc.id, status="processing")
+                await QCJobDocuments.update_document(doc.id, status="processing")
 
                 doc_meta = doc.meta or {}
                 page_images = doc_meta.get("page_images", {})
 
                 if not page_images:
                     log.warning(f"No page images for document {doc.id}")
-                    QCJobDocuments.update_document(doc.id, status="failed")
+                    await QCJobDocuments.update_document(doc.id, status="failed")
                     any_failed = True
                     continue
 
@@ -1581,7 +1581,7 @@ async def run_qc_job(
                         page_error_count += 1
 
                     # Get next finding number
-                    finding_number = QCFindings.get_next_finding_number(job_id)
+                    finding_number = await QCFindings.get_next_finding_number(job_id)
 
                     page_findings_data = []
                     pdf_path = doc_pdf_paths.get(doc.id)
@@ -1598,8 +1598,8 @@ async def run_qc_job(
                             )
                             if should_suppress and matched_rule_id:
                                 try:
-                                    QCSuppressionRules.record_hit(matched_rule_id)
-                                    QCSuppressionEvents.insert_event(
+                                    await QCSuppressionRules.record_hit(matched_rule_id)
+                                    await QCSuppressionEvents.insert_event(
                                         matched_rule_id,
                                         job_id,
                                         doc.id,
@@ -1684,7 +1684,7 @@ async def run_qc_job(
                                 "created_at": int(time.time()),
                                 "updated_at": int(time.time()),
                             }
-                            QCFindings.insert_finding_raw(finding_data)
+                            await QCFindings.insert_finding_raw(finding_data)
                             page_findings_data.append(finding_data)
                             total_findings += 1
 
@@ -1734,14 +1734,14 @@ async def run_qc_job(
 
                 # Update document meta with annotated images
                 updated_meta = {**(doc.meta or {}), "annotated_images": annotated_images}
-                QCJobDocuments.update_document(
+                await QCJobDocuments.update_document(
                     doc.id, status="completed", meta=updated_meta
                 )
                 all_failed = False
 
             except Exception as e:
                 log.error(f"Error processing document {doc.id}: {e}")
-                QCJobDocuments.update_document(doc.id, status="failed")
+                await QCJobDocuments.update_document(doc.id, status="failed")
                 any_failed = True
 
         # ─── Cross-reference after per-page (default mode) ───
@@ -1767,7 +1767,7 @@ async def run_qc_job(
             log.warning(f"Duplicate linking failed for job {job_id}: {e}")
 
         # Determine overall result
-        findings = QCFindings.get_findings_by_job_id(job_id)
+        findings = await QCFindings.get_findings_by_job_id(job_id)
         has_critical = any(f.severity == "critical" for f in findings)
         has_major = any(f.severity == "major" for f in findings)
 
@@ -1809,7 +1809,7 @@ async def run_qc_job(
         if xref_pass_error:
             job_meta["cross_ref_error"] = xref_pass_error
 
-        updated_job = QCJobs.update_job_status(
+        updated_job = await QCJobs.update_job_status(
             job_id, status, overall_result=overall_result, meta=job_meta
         )
 
@@ -1824,27 +1824,27 @@ async def run_qc_job(
                 )
                 from open_webui.utils.qc_testrun import compute_test_metrics
 
-                run = QCTestRuns.get_run_by_id(test_run_id)
+                run = await QCTestRuns.get_run_by_id(test_run_id)
                 if run:
-                    expected = QCTestSetExpectedFindings.get_expected_by_test_set_id(
+                    expected = await QCTestSetExpectedFindings.get_expected_by_test_set_id(
                         run.test_set_id
                     )
-                    ts_docs = QCTestSetDocuments.get_documents_by_test_set_id(
+                    ts_docs = await QCTestSetDocuments.get_documents_by_test_set_id(
                         run.test_set_id
                     )
                     # Build file-id mapping for produced (qc_job_document.id -> file_id)
-                    produced_docs = QCJobDocuments.get_documents_by_job_id(job_id)
+                    produced_docs = await QCJobDocuments.get_documents_by_job_id(job_id)
                     produced_map = {d.id: d.file_id for d in produced_docs}
                     expected_map = {d.id: d.file_id for d in ts_docs}
 
-                    produced_findings = QCFindings.get_findings_by_job_id(job_id) or []
+                    produced_findings = await QCFindings.get_findings_by_job_id(job_id) or []
                     metrics = compute_test_metrics(
                         [f.model_dump() for f in produced_findings],
                         [e.model_dump() for e in expected],
                         produced_doc_file_ids=produced_map,
                         expected_doc_file_ids=expected_map,
                     )
-                    QCTestRuns.update_run(
+                    await QCTestRuns.update_run(
                         test_run_id,
                         status="completed" if status in ("completed", "partial") else "failed",
                         metrics=metrics,
@@ -1854,7 +1854,7 @@ async def run_qc_job(
             try:
                 from open_webui.models.qc import QCTestRuns
                 if getattr(job, "test_run_id", None):
-                    QCTestRuns.update_run(job.test_run_id, status="failed")
+                    await QCTestRuns.update_run(job.test_run_id, status="failed")
             except Exception:
                 pass
 
@@ -1862,5 +1862,5 @@ async def run_qc_job(
 
     except Exception as e:
         log.error(f"Error running QC job {job_id}: {e}")
-        QCJobs.update_job_status(job_id, "failed")
+        await QCJobs.update_job_status(job_id, "failed")
         raise
