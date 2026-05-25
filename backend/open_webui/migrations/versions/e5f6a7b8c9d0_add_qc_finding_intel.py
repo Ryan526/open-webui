@@ -1,7 +1,7 @@
 """Add QC finding intelligence (duplicates + suppression)
 
 Revision ID: e5f6a7b8c9d0
-Revises: d4e5f6a7b8c9
+Revises: d5e6f7a8b9c0
 Create Date: 2026-04-16 11:00:00.000000
 
 """
@@ -14,7 +14,7 @@ import sqlalchemy as sa
 from open_webui.migrations.util import get_existing_tables
 
 revision: str = "e5f6a7b8c9d0"
-down_revision: Union[str, None] = "d4e5f6a7b8c9"
+down_revision: Union[str, None] = "d5e6f7a8b9c0"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

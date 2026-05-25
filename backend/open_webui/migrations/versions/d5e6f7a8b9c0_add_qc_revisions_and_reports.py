@@ -1,6 +1,6 @@
 """Add QC projects, revisions, and reports
 
-Revision ID: d4e5f6a7b8c9
+Revision ID: d5e6f7a8b9c0
 Revises: c3d4e5f6a7b8
 Create Date: 2026-04-16 10:00:00.000000
 
@@ -13,7 +13,7 @@ import sqlalchemy as sa
 
 from open_webui.migrations.util import get_existing_tables
 
-revision: str = "d4e5f6a7b8c9"
+revision: str = "d5e6f7a8b9c0"
 down_revision: Union[str, None] = "c3d4e5f6a7b8"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
