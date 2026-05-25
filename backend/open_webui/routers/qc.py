@@ -17,7 +17,6 @@ from fastapi import (
     status,
 )
 from fastapi.responses import StreamingResponse
-from sqlalchemy.orm import Session
 
 from open_webui.models.qc import (
     QCTemplates,
