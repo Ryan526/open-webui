@@ -1350,7 +1350,7 @@ async def _generate_report_background(
 
             include_severities = options.get("include_severities")
             include_dismissed = bool(options.get("include_dismissed", False))
-            pdf_bytes, meta = generate_branded_pdf(
+            pdf_bytes, meta = await generate_branded_pdf(
                 job,
                 documents,
                 findings,
@@ -1359,7 +1359,7 @@ async def _generate_report_background(
                 include_dismissed=include_dismissed,
             )
             filename = f"qc_report_{job_id}.pdf"
-            file_id = persist_report_bytes(user_id, job_id, filename, pdf_bytes, "application/pdf")
+            file_id = await persist_report_bytes(user_id, job_id, filename, pdf_bytes, "application/pdf")
             await QCReports.update_report(
                 report_id, status="ready", file_id=file_id, meta=meta
             )
@@ -1372,11 +1372,11 @@ async def _generate_report_background(
             if target_doc is None:
                 raise RuntimeError("document not found")
             doc_findings = [f for f in findings if f.document_id == doc_id]
-            pdf_bytes, meta = generate_redlined_pdf(job, target_doc, doc_findings)
+            pdf_bytes, meta = await generate_redlined_pdf(job, target_doc, doc_findings)
             doc_meta = target_doc.meta or {}
             base_name = (doc_meta.get("name") or f"document_{doc_id}").rsplit(".", 1)[0]
             filename = f"{base_name}_redlined.pdf"
-            file_id = persist_report_bytes(user_id, job_id, filename, pdf_bytes, "application/pdf")
+            file_id = await persist_report_bytes(user_id, job_id, filename, pdf_bytes, "application/pdf")
             await QCReports.update_report(
                 report_id, status="ready", file_id=file_id, meta=meta
             )

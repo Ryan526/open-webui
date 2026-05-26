@@ -291,7 +291,7 @@ def process_excel_for_qc(file_path: str) -> list[dict]:
     return sheets
 
 
-def ingest_file_as_document(
+async def ingest_file_as_document(
     user_id: str,
     uploaded_file,
     *,
@@ -361,7 +361,7 @@ def ingest_file_as_document(
     if extra_meta:
         meta.update(extra_meta)
 
-    Files.insert_new_file(
+    await Files.insert_new_file(
         user_id,
         FileForm(
             id=file_id,
@@ -405,7 +405,7 @@ def ingest_file_as_document(
             if extra_meta:
                 page_meta.update(extra_meta)
 
-            Files.insert_new_file(
+            await Files.insert_new_file(
                 user_id,
                 FileForm(
                     id=page_file_id,

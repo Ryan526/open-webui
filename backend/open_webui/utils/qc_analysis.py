@@ -896,7 +896,7 @@ async def generate_checklist_suggestions(
     kb_parts = []
     for kb_id in knowledge_base_ids:
         try:
-            kb_files = Knowledges.get_files_by_id(kb_id)
+            kb_files = await Knowledges.get_files_by_id(kb_id)
             for f in kb_files:
                 file_content = (f.data or {}).get("content", "")
                 if file_content:
@@ -1264,7 +1264,7 @@ async def _run_cross_reference_pass(
             # Get page image for vision extraction (if needed)
             page_image_b64 = None
             try:
-                file_record = Files.get_file_by_id(clean_file_id)
+                file_record = await Files.get_file_by_id(clean_file_id)
                 if file_record:
                     fp = Storage.get_file(file_record.path)
                     with open(fp, "rb") as f:
@@ -1289,7 +1289,7 @@ async def _run_cross_reference_pass(
         # Get document name for the index
         doc_name = "Unknown"
         try:
-            file_record = Files.get_file_by_id(doc.file_id)
+            file_record = await Files.get_file_by_id(doc.file_id)
             if file_record:
                 doc_name = (file_record.meta or {}).get("name", file_record.filename)
         except Exception:
@@ -1444,7 +1444,7 @@ async def run_qc_job(
     doc_pdf_paths = {}
     for doc in documents:
         try:
-            file_record = Files.get_file_by_id(doc.file_id)
+            file_record = await Files.get_file_by_id(doc.file_id)
             if file_record:
                 file_meta = file_record.meta or {}
                 content_type = file_meta.get("content_type", "")
@@ -1547,7 +1547,7 @@ async def run_qc_job(
                     total_pages += 1
 
                     # Get the clean page image
-                    file_record = Files.get_file_by_id(clean_file_id)
+                    file_record = await Files.get_file_by_id(clean_file_id)
                     if not file_record:
                         log.warning(f"Clean page image file {clean_file_id} not found")
                         continue
@@ -1711,7 +1711,7 @@ async def run_qc_job(
                             "OpenWebUI-File-Id": annotated_file_id,
                         },
                     )
-                    Files.insert_new_file(
+                    await Files.insert_new_file(
                         user.id,
                         FileForm(
                             **{
@@ -1762,7 +1762,7 @@ async def run_qc_job(
         duplicates_linked = 0
         try:
             from open_webui.utils.qc_duplicates import find_and_link_duplicates
-            duplicates_linked = find_and_link_duplicates(job_id)
+            duplicates_linked = await find_and_link_duplicates(job_id)
         except Exception as e:
             log.warning(f"Duplicate linking failed for job {job_id}: {e}")
 

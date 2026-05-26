@@ -47,11 +47,11 @@ def _resolve_branding(job: Optional[dict], template_meta: Optional[dict]) -> dic
     return b
 
 
-def _logo_data_uri(logo_file_id: Optional[str]) -> Optional[str]:
+async def _logo_data_uri(logo_file_id: Optional[str]) -> Optional[str]:
     if not logo_file_id:
         return None
     try:
-        file_record = Files.get_file_by_id(logo_file_id)
+        file_record = await Files.get_file_by_id(logo_file_id)
         if not file_record:
             return None
         path = Storage.get_file(file_record.path)
@@ -116,7 +116,7 @@ def _image_bytes_to_data_uri(img_bytes: Optional[bytes]) -> Optional[str]:
     return f"data:image/png;base64,{base64.b64encode(img_bytes).decode('ascii')}"
 
 
-def _load_annotated_image(doc_meta: dict, page_number: Optional[int]) -> Optional[bytes]:
+async def _load_annotated_image(doc_meta: dict, page_number: Optional[int]) -> Optional[bytes]:
     if not page_number:
         return None
     annotated = (doc_meta or {}).get("annotated_images") or {}
@@ -125,7 +125,7 @@ def _load_annotated_image(doc_meta: dict, page_number: Optional[int]) -> Optiona
     if not file_id:
         return None
     try:
-        file_record = Files.get_file_by_id(file_id)
+        file_record = await Files.get_file_by_id(file_id)
         if not file_record:
             return None
         path = Storage.get_file(file_record.path)
@@ -151,7 +151,7 @@ def _render_branded_html(context: dict) -> str:
     return tpl.render(**context)
 
 
-def generate_branded_pdf(
+async def generate_branded_pdf(
     job: QCJobModel,
     documents: list[QCJobDocumentModel],
     findings: list[QCFindingModel],
@@ -174,7 +174,7 @@ def generate_branded_pdf(
     for k, v in branding.items():
         if v is not None:
             resolved[k] = v
-    resolved["logo_data_uri"] = _logo_data_uri(resolved.get("logo_file_id"))
+    resolved["logo_data_uri"] = await _logo_data_uri(resolved.get("logo_file_id"))
 
     warnings: list[str] = []
     include_set = set(s.lower() for s in (include_severities or SEVERITY_ORDER))
@@ -196,7 +196,7 @@ def generate_branded_pdf(
         if doc:
             doc_meta = doc.meta or {}
             doc_name = doc_meta.get("name") or doc_meta.get("filename") or doc.file_id
-            annotated_bytes = _load_annotated_image(doc_meta, f.page_number)
+            annotated_bytes = await _load_annotated_image(doc_meta, f.page_number)
         cropped = _crop_finding(annotated_bytes, f.location) if annotated_bytes else None
         image_uri = _image_bytes_to_data_uri(cropped)
         severity_counts[sev] = severity_counts.get(sev, 0) + 1
@@ -275,7 +275,7 @@ SEVERITY_COLOR_RGB = {
 }
 
 
-def generate_redlined_pdf(
+async def generate_redlined_pdf(
     job: QCJobModel,
     document: QCJobDocumentModel,
     findings_for_document: list[QCFindingModel],
@@ -291,7 +291,7 @@ def generate_redlined_pdf(
 
     warnings: list[str] = []
 
-    file_record = Files.get_file_by_id(document.file_id)
+    file_record = await Files.get_file_by_id(document.file_id)
     if not file_record:
         raise RuntimeError("Source file for document not found")
 
@@ -383,7 +383,7 @@ def generate_redlined_pdf(
     return out_buf.getvalue(), meta
 
 
-def persist_report_bytes(
+async def persist_report_bytes(
     user_id: str,
     job_id: str,
     filename: str,
@@ -403,7 +403,7 @@ def persist_report_bytes(
             "OpenWebUI-File-Id": file_id,
         },
     )
-    Files.insert_new_file(
+    await Files.insert_new_file(
         user_id,
         FileForm(
             id=file_id,
